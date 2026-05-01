@@ -1262,17 +1262,16 @@ async function runValueExchangeLoop() {
     const drawn = p.drawn || [];
     const lastCard = drawn[drawn.length - 1];
     if (!lastCard) break;
-    const choice = await showPrompt({
-      title: `\u21bb Value Exchange (draw ${drawn.length}/3)`,
-      bodyHtml: `
-        <p>You drew this card. Accept to swap; decline to ${p.remaining > 0 ? 'try the next draw' : 'keep your original card'}.</p>
-        ${miniCardsRowHtml(drawn, { highlightLast: true })}
-      `,
-      actions: [
-        ...(p.remaining > 0 ? [{ label: 'Decline (draw next)', value: 'decline' }] : [{ label: 'Decline (keep original)', value: 'decline' }]),
+    const choice = await appendChronicleAction(
+      'exchange-draw',
+      `\u21bb Value Exchange (draw ${drawn.length}/3)`,
+      `<p>You drew this card. Accept to swap; decline to ${p.remaining > 0 ? 'try the next draw' : 'keep your original card'}.</p>
+        ${miniCardsRowHtml(drawn, { highlightLast: true })}`,
+      [
+        (p.remaining > 0 ? { label: 'Decline (draw next)', value: 'decline' } : { label: 'Decline (keep original)', value: 'decline' }),
         { label: 'Accept this card', value: 'accept', primary: true },
       ],
-    });
+    );
     if (mode === 'guest') {
       lobby.sendActionToHost({ kind: 'EXCHANGE_RESOLVE', accept: choice === 'accept' });
       return;
