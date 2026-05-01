@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Seahorse Chess</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="aurora" aria-hidden="true">
+    <div class="blob b1"></div>
+    <div class="blob b2"></div>
+    <div class="blob b3"></div>
+    <div class="blob b4"></div>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">♞</div>
+      <div class="brand-text">
+        <h1>Seahorse Chess</h1>
+        <p>Race · Card · Combat</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-rules" class="ghost-btn">Rules</button>
+      <button id="btn-restart" class="ghost-btn">New Game</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Left: dice tray, draw/discard piles, notification -->
+    <aside class="side side-left">
+      <div class="dice-tray glass">
+        <div class="dice-row">
+          <div id="die1" class="die"></div>
+          <div id="die2" class="die"></div>
+        </div>
+        <div class="dice-flags" id="dice-flags"></div>
+        <button id="btn-roll" class="primary-btn">🎲 Roll Dice</button>
+        <button id="btn-skip" class="ghost-btn small">Skip Move</button>
+      </div>
+
+      <section id="piles" class="piles glass">
+        <div class="pile">
+          <div class="pile-label">Draw</div>
+          <div class="pile-stack" id="pile-draw" title="Draw deck">
+            <div class="pile-card back"></div>
+          </div>
+          <div class="pile-count" id="pile-draw-count">0</div>
+        </div>
+        <div class="pile">
+          <div class="pile-label">Discard</div>
+          <div class="pile-stack clickable" id="pile-discard" title="Click to view all discarded cards">
+            <div class="pile-card empty">∅</div>
+          </div>
+          <div class="pile-count" id="pile-discard-count">0</div>
+        </div>
+      </section>
+
+      <section id="notif" class="notif glass">
+        <div class="notif-title" id="notif-title">Notification</div>
+        <div class="notif-body" id="notif-body">
+          <p class="muted">Game events will appear here.</p>
+        </div>
+      </section>
+    </aside>
+
+    <!-- Center: board with in-stable player info overlays -->
+    <section class="board-wrap">
+      <div id="board" class="board" role="grid" aria-label="Game board">
+        <div class="stable-info" id="stable-info-D" data-faction="D"></div>
+        <div class="stable-info" id="stable-info-C" data-faction="C"></div>
+        <div class="stable-info" id="stable-info-A" data-faction="A"></div>
+        <div class="stable-info" id="stable-info-B" data-faction="B"></div>
+      </div>
+      <div class="turn-banner">
+        <div class="turn-name" id="turn-name">—</div>
+        <div class="turn-phase" id="turn-phase">Loading…</div>
+      </div>
+    </section>
+
+    <!-- Right: chronicle only -->
+    <aside class="side side-right">
+      <section class="logbar glass">
+        <div class="log-title">Chronicle</div>
+        <ul id="log" class="log"></ul>
+      </section>
+    </aside>
+  </main>
+
+  <!-- Move selection overlay -->
+  <div id="move-overlay" class="overlay hidden">
+    <div class="overlay-card glass">
+      <h3>Choose a move</h3>
+      <p id="move-subtitle"></p>
+      <div id="move-options" class="move-options"></div>
+      <button class="ghost-btn" id="move-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Reveal card overlay -->
+  <div id="card-overlay" class="overlay hidden">
+    <div class="overlay-card glass">
+      <h3 id="card-title">A horse drew a card</h3>
+      <div class="card-stage" id="card-stage"></div>
+      <p id="card-sub" class="muted"></p>
+      <button class="primary-btn" id="card-ok">Continue</button>
+    </div>
+  </div>
+
+  <!-- Combat overlay -->
+  <div id="combat-overlay" class="overlay hidden">
+    <div class="overlay-card glass wide">
+      <h3>⚔ Combat!</h3>
+      <div class="combat-grid">
+        <div class="combat-side">
+          <div class="combat-label">Attacker</div>
+          <div class="card-stage" id="combat-att"></div>
+        </div>
+        <div class="combat-vs">VS</div>
+        <div class="combat-side">
+          <div class="combat-label">Defender</div>
+          <div class="card-stage" id="combat-def"></div>
+        </div>
+      </div>
+      <p id="combat-result" class="combat-result"></p>
+      <button class="primary-btn" id="combat-ok">Continue</button>
+    </div>
+  </div>
+
+  <!-- Win overlay -->
+  <div id="win-overlay" class="overlay hidden">
+    <div class="overlay-card glass">
+      <h2 id="win-title">Victory!</h2>
+      <p id="win-sub"></p>
+      <ol id="win-rank" class="ranking"></ol>
+      <button class="primary-btn" id="win-restart">Play Again</button>
+    </div>
+  </div>
+
+  <!-- Rules overlay -->
+  <div id="rules-overlay" class="overlay hidden">
+    <div class="overlay-card glass tall">
+      <h3>Quick Rules</h3>
+      <ul class="rules-list">
+        <li><b>Goal:</b> Get all 4 horses into the deepest home steps (3, 4, 5, 6).</li>
+        <li><b>Exit:</b> Roll <i>doubles</i> or <i>(1,6)</i> to release a horse onto your exit cell. Bonus turn granted on every doubles or (1,6).</li>
+        <li><b>Move:</b> Each turn move one horse by 0, X, Y, or X+Y steps. Track loops counter-clockwise.</li>
+        <li><b>Cards:</b> Each exiting horse draws a hidden card. Only the owner sees it (your own cards appear as text on the horse).</li>
+        <li><b>Combat:</b> Higher card wins. Loser returns to stable and discards card publicly; defender loses 1 life. 0 lives → stable & lose card.</li>
+        <li><b>Combat visibility:</b> Both fighters reveal cards to each other. Third parties only see the loser's card (via the public discard).</li>
+        <li><b>Specials:</b> Joker draws 3 cards, highest counts. Soul Stealer wins by stealing the rival's card identity.</li>
+        <li><b>Home entry:</b> Free entry from the main track. Inside the home stretch, a single die must exactly match your next step (or use both dice for the rare two-step jump).</li>
+        <li><b>Free Exit:</b> 3 failed exits in a row with no horse on the track → next turn one free exit is granted.</li>
+        <li><b>PVP:</b> Create a room, share the 9-digit code or invite link. Add bots in empty slots. Host clicks Start when all 4 slots are filled.</li>
+      </ul>
+      <button class="primary-btn" id="rules-close">Got it</button>
+    </div>
+  </div>
+
+  <!-- Discard list overlay -->
+  <div id="discard-overlay" class="overlay hidden">
+    <div class="overlay-card glass wide">
+      <h3>Discard Pile</h3>
+      <p class="muted" id="discard-sub">Cards in discard order (oldest → newest)</p>
+      <div id="discard-list" class="discard-list"></div>
+      <button class="primary-btn" id="discard-close">Close</button>
+    </div>
+  </div>
+
+  <!-- Setup screen (single-player only) -->
+  <div id="setup-overlay" class="overlay hidden">
+    <div class="overlay-card glass wide setup-card">
+      <h2>Single-Player Setup</h2>
+      <p class="muted">Customize player names and types, then begin the race.</p>
+      <div class="setup-grid" id="setup-grid"></div>
+      <div class="setup-actions">
+        <button class="ghost-btn" id="setup-randomize">Randomize Names</button>
+        <button class="ghost-btn" id="setup-back">← Back to Lobby</button>
+        <button class="primary-btn" id="setup-start">⚔ Start Game</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lobby: name + mode picker -->
+  <div id="lobby-overlay" class="overlay">
+    <div class="overlay-card glass wide setup-card">
+      <h2>Seahorse Chess</h2>
+      <p class="muted">Race · Card · Combat — single-player or online room.</p>
+
+      <div class="lobby-name-row">
+        <label for="lobby-name">Your name</label>
+        <input id="lobby-name" type="text" maxlength="20" placeholder="Enter your name" />
+      </div>
+
+      <div class="lobby-modes">
+        <button class="primary-btn lobby-mode" id="lobby-solo">▶ Single Player</button>
+        <button class="primary-btn lobby-mode" id="lobby-create">+ Create Room</button>
+        <div class="lobby-join-row">
+          <input id="lobby-join-code" type="text" maxlength="9" placeholder="9-digit room code" />
+          <button class="primary-btn lobby-mode" id="lobby-join">→ Join Room</button>
+        </div>
+      </div>
+
+      <p id="lobby-status" class="muted lobby-status"></p>
+    </div>
+  </div>
+
+  <!-- Room view (PVP) -->
+  <div id="room-overlay" class="overlay hidden">
+    <div class="overlay-card glass wide setup-card">
+      <h2>Room <span id="room-id" class="room-id">—</span></h2>
+      <div class="room-invite">
+        <label>Invite link</label>
+        <div class="invite-row">
+          <input id="room-invite-url" type="text" readonly />
+          <button class="ghost-btn" id="room-copy-invite">📋 Copy</button>
+        </div>
+      </div>
+
+      <div class="room-slots" id="room-slots"></div>
+
+      <div class="setup-actions">
+        <button class="ghost-btn" id="room-leave">← Leave Room</button>
+        <button class="primary-btn" id="room-start">⚔ Start Game</button>
+      </div>
+
+      <p id="room-status" class="muted lobby-status"></p>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
