@@ -130,7 +130,11 @@ export function renderHorses(boardEl, state, opts = {}) {
         // Show card value/glyph BIG inside the horse instead of the knight icon.
         let label = '?';
         let extraCls = '';
-        if (h.card.kind === 'joker') { label = 'JK'; extraCls = ' card-special'; }
+        if (h.card.kind === 'joker') {
+          label = h.card.color === 'red' ? 'RJ' : 'BJ';
+          extraCls = ' card-special';
+          if (h.card.color === 'red') extraCls += ' card-red';
+        }
         else if (h.card.kind === 'soul') { label = 'SS'; extraCls = ' card-special'; }
         else {
           const glyph = { S: '♠', C: '♣', D: '♦', H: '♥' }[h.card.suit];
@@ -205,7 +209,18 @@ export function renderPanels(state, opts = {}) {
     const rankBadge = rank
       ? `<div class="si-rank rank-${rank}" title="Live ranking (1 = best)">#${rank}</div>`
       : `<div class="si-rank si-rank-empty"></div>`;
-    el.innerHTML = `
+
+    // Render into a dedicated content wrapper so the dice tray (a sibling)
+    // is never disturbed. Disturbing the tray on every rerender restarts
+    // its CSS rolling animation, causing inconsistent spin counts between
+    // the two dice.
+    let content = el.querySelector(':scope > .si-content');
+    if (!content) {
+      content = document.createElement('div');
+      content.className = 'si-content';
+      el.insertBefore(content, el.firstChild);
+    }
+    content.innerHTML = `
       <div class="si-name" style="color:${info.color}">${escapeHtml(playerName)}${botTag}</div>
       ${rankBadge}
       <div class="si-stats">
@@ -256,15 +271,59 @@ export function renderDice(state) {
     if (dice.oneSix) flags.innerHTML += `<span class="flag">1·6</span>`;
     if (dice.exitRoll) flags.innerHTML += `<span class="flag">EXIT!</span>`;
   }
+
+  // Reparent dice tray into the active player's stable-info overlay so it
+  // physically sits inside their corner (rows 5-6 of the 6-row stable).
+  // IMPORTANT: only reparent when the parent actually changes — otherwise the
+  // CSS rolling animation restarts on every rerender.
+  const tray = document.getElementById('dice-tray');
+  if (tray) {
+    if (state.winner) {
+      tray.style.display = 'none';
+    } else {
+      tray.style.display = '';
+      const target = document.getElementById(`stable-info-${state.turn.player}`);
+      if (target && tray.parentElement !== target) {
+        target.appendChild(tray);
+        // Strip any lingering rolling class so a previous turn's animation
+        // cannot replay inside the new active stable.
+        for (const id of ['die1', 'die2']) {
+          const el = document.getElementById(id);
+          if (el) {
+            el.classList.remove('rolling');
+            if (el._rollTimer) { clearTimeout(el._rollTimer); el._rollTimer = null; }
+          }
+        }
+      }
+      tray.dataset.faction = state.turn.player;
+    }
+  }
 }
 
 export function shakeDice() {
-  for (const id of ['die1', 'die2']) {
-    const el = document.getElementById(id);
+  const els = ['die1', 'die2'].map(id => document.getElementById(id)).filter(Boolean);
+  // Remove any lingering rolling class and clear any pending auto-strip timers.
+  for (const el of els) {
     el.classList.remove('rolling');
-    void el.offsetWidth;
-    el.classList.add('rolling');
+    if (el._rollTimer) { clearTimeout(el._rollTimer); el._rollTimer = null; }
   }
+  // Force a single synchronous reflow on BOTH elements together so they restart
+  // the CSS animation at the exact same frame.
+  if (els[0]) void els[0].offsetWidth;
+  if (els[1]) void els[1].offsetWidth;
+  // Apply the class on the next animation frame so both dice get the class
+  // assignment within the same paint, guaranteeing synchronized animations.
+  requestAnimationFrame(() => {
+    for (const el of els) {
+      el.classList.add('rolling');
+      // Auto-strip after the animation completes so a later reroll or a
+      // turn change that reparents the tray cannot replay a partial animation.
+      el._rollTimer = setTimeout(() => {
+        el.classList.remove('rolling');
+        el._rollTimer = null;
+      }, 1150); // animation = 0.55s * 2 iterations + small buffer
+    }
+  });
 }
 
 // ---------- Turn banner ----------
@@ -312,7 +371,11 @@ export function renderLog(state) {
 function miniCardHtml(card) {
   if (!card) return '';
   if (card.hidden) return `<div class="mini-card back"></div>`;
-  if (card.kind === 'joker') return `<div class="mini-card special">JK</div>`;
+  if (card.kind === 'joker') {
+    const lbl = card.color === 'red' ? 'RJ' : 'BJ';
+    const red = card.color === 'red' ? ' red' : '';
+    return `<div class="mini-card special${red}">${lbl}</div>`;
+  }
   if (card.kind === 'soul')  return `<div class="mini-card special">SS</div>`;
   const glyph = { S: '♠', C: '♣', D: '♦', H: '♥' }[card.suit];
   const red = (card.suit === 'H' || card.suit === 'D') ? ' red' : '';
@@ -327,29 +390,122 @@ function flashNotif() {
   n.classList.add('flash');
 }
 
-export function showCard(card, title = 'Card', sub = '', _autoMs = 0) {
-  const titleEl = document.getElementById('notif-title');
+// ---------- Chronicle (scrolling history of all events) ----------
+const CHRONICLE_MAX = 60;
+
+function chronicleNow() {
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+function appendChronicleEntry(kind, title, innerHtml) {
   const body = document.getElementById('notif-body');
-  if (titleEl) titleEl.textContent = title;
-  if (body) {
-    body.innerHTML = `
-      <div class="notif-row">
-        ${miniCardHtml(card)}
-        <div class="notif-text">${escapeHtml(sub)}</div>
-      </div>
-    `;
+  if (!body) return;
+  // Remove the initial muted placeholder, if any.
+  const placeholder = body.querySelector('p.muted');
+  if (placeholder) placeholder.remove();
+
+  const entry = document.createElement('div');
+  entry.className = `notif-entry notif-entry-${kind}`;
+  entry.innerHTML = `
+    <div class="notif-entry-head">
+      <span class="notif-entry-title">${escapeHtml(title)}</span>
+      <span class="notif-entry-time">${chronicleNow()}</span>
+    </div>
+    <div class="notif-entry-body">${innerHtml}</div>
+  `;
+  // Newest at top.
+  body.prepend(entry);
+  // Cap entries.
+  while (body.children.length > CHRONICLE_MAX) {
+    body.removeChild(body.lastElementChild);
   }
   flashNotif();
+}
+
+export function clearChronicle() {
+  const body = document.getElementById('notif-body');
+  if (!body) return;
+  body.innerHTML = '<p class="muted">Game events will appear here.</p>';
+}
+
+// Append a chronicle entry that includes interactive action buttons.
+//   actions: [{ label, value, primary?:bool }]
+// Returns a Promise that resolves with the chosen `value`. After click, buttons
+// are replaced by a small label so the entry remains in the chronicle as history.
+export function appendChronicleAction(kind, title, innerHtml, actions) {
+  return new Promise(resolve => {
+    const body = document.getElementById('notif-body');
+    if (!body) { resolve(null); return; }
+    const placeholder = body.querySelector('p.muted');
+    if (placeholder) placeholder.remove();
+    const entry = document.createElement('div');
+    entry.className = `notif-entry notif-entry-${kind} notif-entry-action`;
+    const actId = `chr-act-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    entry.innerHTML = `
+      <div class="notif-entry-head">
+        <span class="notif-entry-title">${escapeHtml(title)}</span>
+        <span class="notif-entry-time">${chronicleNow()}</span>
+      </div>
+      <div class="notif-entry-body">${innerHtml}</div>
+      <div class="notif-actions" id="${actId}"></div>
+    `;
+    body.prepend(entry);
+    while (body.children.length > CHRONICLE_MAX) body.removeChild(body.lastElementChild);
+    const actWrap = entry.querySelector(`#${actId}`);
+    for (const a of actions) {
+      const b = document.createElement('button');
+      b.textContent = a.label;
+      b.className = a.primary ? 'primary-btn small' : 'ghost-btn small';
+      b.onclick = () => {
+        // Replace the action row with a chosen-label so the entry still reads as history.
+        actWrap.innerHTML = `<span class="muted">\u2192 ${escapeHtml(a.label)}</span>`;
+        resolve(a.value);
+      };
+      actWrap.appendChild(b);
+    }
+    flashNotif();
+  });
+}
+
+// Render the (simplified) turn-order pick as a chronicle entry (rule §1).
+export function showRollOff(state, rollOff) {
+  if (!rollOff || !Array.isArray(rollOff.order)) return;
+  const factionName = (f) => {
+    const fac = state.factions[f];
+    return (fac && fac.name) || f;
+  };
+  const first = rollOff.first || rollOff.order[0];
+  const inner = `
+    <p>First player chosen at random: <b style="color:var(--${first})">${escapeHtml(factionName(first))}</b>.</p>
+    <p class="muted" style="margin-top:6px">Play continues counter-clockwise from there.</p>
+  `;
+  appendChronicleEntry('rolloff', '🎲 Turn order', inner);
+}
+
+export function showCard(card, title = 'Card', sub = '', _autoMs = 0) {
+  const inner = `
+    <div class="notif-row">
+      ${miniCardHtml(card)}
+      <div class="notif-text">${escapeHtml(sub)}</div>
+    </div>
+  `;
+  appendChronicleEntry('card', title, inner);
   return Promise.resolve();
 }
 
 export function renderCardHtml(card) {
   if (!card) return `<div class="play-card"><div class="pip">?</div></div>`;
   if (card.kind === 'joker') {
-    return `<div class="play-card special">
-      <div class="corner tl">JK</div>
+    const lbl = card.color === 'red' ? 'RJ' : 'BJ';
+    const colorCls = card.color === 'red' ? ' red' : '';
+    return `<div class="play-card special${colorCls}">
+      <div class="corner tl">${lbl}</div>
       <div class="pip">${card.color === 'red' ? '🃟' : '🂿'}</div>
-      <div class="corner br">JK</div>
+      <div class="corner br">${lbl}</div>
     </div>`;
   }
   if (card.kind === 'soul') {
@@ -372,42 +528,52 @@ export function renderCardHtml(card) {
 function jokerDrawsHtml(card) {
   if (!card || card.kind !== 'joker' || !Array.isArray(card._jokerDraws)) return '';
   const draws = card._jokerDraws;
-  // Determine the highest by the same rule used in resolveCombatCard:
-  // joker counts as 14, otherwise card.value (or 0).
-  const valOf = (d) => d.kind === 'joker' ? 14 : (d.value ?? 0);
-  let bestIdx = 0, bestVal = -1;
-  draws.forEach((d, i) => { const v = valOf(d); if (v > bestVal) { bestVal = v; bestIdx = i; } });
+  // §9: only normal-value cards count toward the joker's value. Jokers and
+  // Soul Steal cards drawn during resolution are shown but excluded from
+  // the "highest" pick. Highlight the strongest valued card.
+  const isSpecial = (d) => d.kind === 'joker' || d.kind === 'soul';
+  let bestIdx = -1, bestVal = -1;
+  draws.forEach((d, i) => {
+    if (isSpecial(d)) return;
+    const v = d.value ?? 0;
+    if (v > bestVal) { bestVal = v; bestIdx = i; }
+  });
   const cells = draws.map((d, i) => {
     const html = miniCardHtml(d);
     return i === bestIdx
       ? html.replace('class="mini-card', 'class="mini-card highlight')
       : html;
   }).join('');
+  const label = draws.length > 3
+    ? `Joker draws — specials skipped, highest of 3 valued cards counts`
+    : `Joker draws 3 → highest counts`;
   return `
     <div class="joker-draws">
-      <div class="joker-draws-label">Joker draws 3 → highest counts</div>
+      <div class="joker-draws-label">${label}</div>
       <div class="joker-draws-row">${cells}</div>
     </div>
   `;
 }
 
-export function showCombat(att, def, text, _autoMs = 0) {
-  const titleEl = document.getElementById('notif-title');
-  const body = document.getElementById('notif-body');
-  if (titleEl) titleEl.textContent = '⚔ Combat';
-  if (body) {
-    const jokerExtras = `${jokerDrawsHtml(att)}${jokerDrawsHtml(def)}`;
-    body.innerHTML = `
-      <div class="notif-row">
-        ${miniCardHtml(att)}
-        <span class="vs">VS</span>
-        ${miniCardHtml(def)}
-      </div>
-      ${jokerExtras}
-      <div class="notif-text" style="margin-top:8px">${escapeHtml(text)}</div>
-    `;
-  }
-  flashNotif();
+export function showCombat(att, def, text, _autoMs = 0, who = {}) {
+  const attName = who.attName || 'Attacker';
+  const defName = who.defName || 'Defender';
+  const jokerExtras = `${jokerDrawsHtml(att)}${jokerDrawsHtml(def)}`;
+  const inner = `
+    <div class="combat-who">
+      <span class="who-att">${escapeHtml(attName)}</span>
+      <span class="who-vs">vs</span>
+      <span class="who-def">${escapeHtml(defName)}</span>
+    </div>
+    <div class="notif-row">
+      ${miniCardHtml(att)}
+      <span class="vs">VS</span>
+      ${miniCardHtml(def)}
+    </div>
+    ${jokerExtras}
+    <div class="notif-text" style="margin-top:8px">${escapeHtml(text)}</div>
+  `;
+  appendChronicleEntry('combat', '⚔ Combat', inner);
   return Promise.resolve();
 }
 
@@ -486,19 +652,65 @@ export function showMovePicker(subtitle, options) {
   });
 }
 
-// ---------- Win overlay ----------
+// ---------- Generic prompt overlay ----------
+//   showPrompt({ title, bodyHtml, actions: [{label, value, primary?:bool, disabled?:bool}] })
+// Returns Promise<value>. The promise resolves with the action's value when clicked.
+export function showPrompt({ title = 'Decision', bodyHtml = '', actions = [] }) {
+  return new Promise(resolve => {
+    const ov = document.getElementById('prompt-overlay');
+    document.getElementById('prompt-title').textContent = title;
+    document.getElementById('prompt-body').innerHTML = bodyHtml;
+    const wrap = document.getElementById('prompt-actions');
+    wrap.innerHTML = '';
+    for (const a of actions) {
+      const b = document.createElement('button');
+      b.textContent = a.label;
+      b.className = a.primary ? 'primary-btn' : 'ghost-btn';
+      if (a.disabled) b.disabled = true;
+      b.onclick = () => { ov.classList.add('hidden'); resolve(a.value); };
+      wrap.appendChild(b);
+    }
+    ov.classList.remove('hidden');
+  });
+}
+
+export function hidePrompt() {
+  const ov = document.getElementById('prompt-overlay');
+  if (ov) ov.classList.add('hidden');
+}
+
+// Render a row of mini-cards (used by prompts).
+export function miniCardsRowHtml(cards, opts = {}) {
+  const cls = opts.className || '';
+  const cells = cards.map((c, i) => {
+    const dim = (opts.highlightLast && i !== cards.length - 1) ? ' dim' : '';
+    return miniCardHtml(c).replace('class="mini-card', `class="mini-card${dim}`);
+  }).join('');
+  return `<div class="prompt-mini-row ${cls}">${cells}</div>`;
+}
+
+// ---------- Win notification (prepended to the chronicle on game over) ----------
 export function showWin(state, ranking) {
-  const ov = document.getElementById('win-overlay');
   const winFac = state.factions[state.winner];
   const winName = (winFac && winFac.name) || `Player ${state.winner}`;
-  document.getElementById('win-title').textContent = `${winName} Triumphs!`;
-  document.getElementById('win-sub').textContent = 'Final ranking below:';
-  const ol = document.getElementById('win-rank');
-  ol.innerHTML = ranking.map(f => {
+  const rows = ranking.map((f, i) => {
     const fac = state.factions[f];
     const nm = (fac && fac.name) || `Player ${f}`;
     const botTag = (fac && fac.bot) ? ' <span class="muted">(bot)</span>' : '';
-    return `<li><b style="color:var(--${f})">${escapeHtml(nm)}</b>${botTag}</li>`;
+    const medal = ['🥇','🥈','🥉','·'][i] || '·';
+    return `<li class="win-row"><span class="win-medal">${medal}</span><b style="color:var(--${f})">${escapeHtml(nm)}</b>${botTag}</li>`;
   }).join('');
-  ov.classList.remove('hidden');
+  const inner = `
+    <div class="win-notif">
+      <div class="win-headline"><b style="color:var(--${state.winner})">${escapeHtml(winName)}</b> Triumphs!</div>
+      <ol class="win-rank-list">${rows}</ol>
+      <button class="primary-btn win-restart-inline" id="win-restart-inline">Play Again</button>
+    </div>
+  `;
+  appendChronicleEntry('win', '👑 Triumph!', inner);
+  const btn = document.getElementById('win-restart-inline');
+  if (btn) btn.addEventListener('click', () => {
+    const dispatch = new CustomEvent('seahorse:restart');
+    window.dispatchEvent(dispatch);
+  });
 }

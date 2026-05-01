@@ -91,12 +91,14 @@ absolutely positioned over its current cell.
 | `.horse.reveal`    | Card has been revealed to the local viewer        |
 
 ### `.horse.reveal`
-- Replaces the ♞ icon with the **big card text** (e.g. `10♥`, `JK`, `SS`).
+- Replaces the ♮ icon with the **big card text** (e.g. `10♥`, `RJ`, `BJ`, `SS`).
+- Joker labels: **`RJ`** for the Red Joker (rendered with red text + glow),
+  **`BJ`** for the Black Joker.
 - **Faction identity** is preserved by a 3px border + glow using
   `--faction: var(--A/B/C/D)` (set per `.horse.{X}.reveal`).
 - **Text colour = faction colour** (high-contrast against the white background).
 - Card-suit hint: a subtle pinkish background tint for ♥/♦, a dark purple
-  background for `JK`/`SS`. Suit affects only the background, not the text.
+  background for `RJ`/`BJ`/`SS`. Suit affects only the background, not the text.
 
 ### Stable layout (4 horses per corner)
 4 fixed grid slots inside the 6×6 stable, one per horse, computed by
@@ -189,7 +191,7 @@ See §2.
    - Discard pile is **clickable**: opens an overlay listing every discarded
      card in chronological order (oldest → newest) with index numbers.
 3. **Notification panel** (`#notif`) — inline event display (replaces the old
-   blocking modal overlays). Three event types write into `#notif-title` /
+   blocking modal overlays). Event types write into `#notif-title` /
    `#notif-body`:
    1. **`showCard(card, title, sub)`** — A card was drawn (only shown to the
       owner). Renders one mini-card.
@@ -197,9 +199,17 @@ See §2.
       `[mini-att] VS [mini-def]` plus the result text. Hidden cards (3rd-party
       view) render as a patterned card-back. **Joker:** if either side's
       resolved card is a joker with `_jokerDraws`, an extra dashed-gold
-      sub-row "Joker draws 3 → highest counts" shows the 3 drawn cards with
-      the highest one highlighted in gold.
+      sub-row shows every drawn card (3 valued cards plus any Jokers / Soul
+      Steal encountered along the way) with the highest *valued* one
+      highlighted in gold.
    3. **`showWin`** — Winner overlay (still uses a modal for emphasis).
+   4. **Chronicle action entries** (§7 Value Exchange, §10 Soul Steal) —
+      auto-triggered offers surface as inline action cards in the chronicle
+      with `[Decline]` / `[Begin]` buttons. Roll Dice / Skip Move stay
+      disabled until the offer is resolved (accept / decline / target picked).
+   5. **Joker inherit prompt** (§9) — modal overlay when a human attacker
+      slays a Joker; player chooses to inherit (old card publicly discarded;
+      Joker becomes face-up to all factions) or decline (Joker discarded).
    A `flashNotif()` helper triggers a brief border pulse animation on every
    update.
 
@@ -269,6 +279,21 @@ is in `cardSeenBy`.
 | `choose`   | Click own horse → highlights `.target` cells → click target |
 | `freeExit` | Click own stable horse → highlights its exit cell → click it. Or `Skip` to decline. |
 
+### Pending-prompt locks
+In addition to phase, the engine exposes four orthogonal pending fields. While
+**any** of these is set, all action buttons (Roll Dice / Skip Move / horse
+selection) are disabled for the local human:
+
+- `pendingInherit` — a slain-Joker inheritance choice is waiting (modal).
+- `pendingOffer` — a one-time §7 Value Exchange or §10 Soul Steal offer is
+  shown as a chronicle action entry awaiting Decline / Begin.
+- `pendingExchange` — a Value Exchange draw run is in progress (modal).
+- `pendingSoul` — a Soul Steal target has been peeked and the player is
+  deciding Steal / Pass (modal).
+
+The host defers `endTurn` while any pending field is set, so the next player’s
+Roll Dice button never appears until the current offer/prompt is resolved.
+
 ### Move picker overlay
 Triggered when the same target cell is reachable via multiple step counts
 (e.g. dice X=3, Y=5: cell at distance 3, 5, or 8 reaches different targets, but
@@ -319,7 +344,11 @@ some shared cell may resolve in two ways). Shows clickable buttons labelled
 | `LEAVE_SLOT`        | guest → host       | `{}`                                   |
 | `START`             | host → all         | `{}`                                   |
 | `STATE`             | host → guest       | `{ state, notifs }` (redacted per recipient) |
-| `ACTION`            | guest → host       | `{ kind, payload }`  (`ROLL` / `SKIP` / `MOVE` / `FREE_EXIT` / `DECLINE_FREE_EXIT`) |
+| `ACTION`            | guest → host       | `{ kind, payload }` — see below |
+
+`ACTION.kind` values: `ROLL`, `SKIP`, `MOVE`, `FREE_EXIT`, `DECLINE_FREE_EXIT`,
+`INHERIT` (joker accept/decline), `EXCHANGE_BEGIN`, `EXCHANGE_RESOLVE`,
+`SOUL_PEEK`, `SOUL_RESOLVE`, `OFFER_DECLINE`.
 
 ### Authority
 - **Host owns the engine.** All randomness (deck, dice) lives on host.

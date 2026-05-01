@@ -345,31 +345,57 @@ body {
 .turn-name { font-family: 'Cinzel', serif; font-size: 16px; letter-spacing: 1.5px; }
 .turn-phase { color: var(--ink-dim); font-size: 12px; }
 
-/* ---------- Dice ---------- */
-.dice-tray {
-  padding: 18px; display: flex; flex-direction: column; gap: 12px; align-items: stretch;
+/* ---------- Dice (now placed inside the active player's stable) ---------- */
+/* Hidden by default until renderDice reparents it into a stable-info. */
+.dice-stable {
+  position: absolute;
+  /* Cover rows 5-6 of the 6-row stable (top 66.67% to 100%, height 33.33%) */
+  top: 66.6667%;
+  left: 4%;
+  right: 4%;
+  height: 33.3333%;
+  display: grid;
+  grid-template-rows: 1fr auto 1fr;
+  align-items: center;
+  justify-items: center;
+  gap: 4px;
+  pointer-events: auto;
+  z-index: 4;
 }
-.dice-row { display: flex; gap: 14px; justify-content: center; }
+/* When parked outside a stable-info (initial state or transient detach), keep it offscreen. */
+body > .dice-stable,
+.board-wrap > .dice-stable {
+  position: absolute;
+  top: -9999px; left: -9999px;
+  visibility: hidden;
+}
+.stable-info > .dice-stable { position: absolute; top: 66.6667%; left: 4%; right: 4%; height: 33.3333%; visibility: visible; }
+
+.dice-stable .ds-row { display: flex; gap: 10px; justify-content: center; align-items: center; }
+.dice-stable .dice-flags { display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; }
+.dice-stable .ds-buttons { display: flex; gap: 6px; justify-content: center; align-items: center; }
+.dice-stable .ds-buttons .primary-btn { padding: 6px 12px; font-size: 12px; }
+.dice-stable .ds-buttons .ghost-btn { padding: 5px 10px; font-size: 11px; }
+
 .die {
-  width: 64px; height: 64px; border-radius: 14px;
+  width: 42px; height: 42px; border-radius: 10px;
   background: linear-gradient(145deg, #fff, #d8d8e8);
   color: #1a1633;
   display: grid; place-items: center;
-  font-family: 'Cinzel', serif; font-size: 32px; font-weight: 900;
-  box-shadow: inset 0 -4px 10px rgba(0,0,0,.15), 0 8px 20px rgba(0,0,0,.4), inset 0 2px 0 rgba(255,255,255,.6);
+  font-family: 'Cinzel', serif; font-size: 22px; font-weight: 900;
+  box-shadow: inset 0 -3px 7px rgba(0,0,0,.15), 0 5px 14px rgba(0,0,0,.4), inset 0 2px 0 rgba(255,255,255,.6);
   position: relative;
   transition: transform .15s;
 }
-.die.rolling { animation: rollSpin .55s ease; }
+.die.rolling { animation: rollSpin .55s ease 2; }
 @keyframes rollSpin {
   0%   { transform: rotate(0deg) scale(1); }
   35%  { transform: rotate(180deg) scale(1.2); }
   70%  { transform: rotate(320deg) scale(.95); }
   100% { transform: rotate(360deg) scale(1); }
 }
-.dice-flags { display: flex; gap: 6px; justify-content: center; }
-.flag {
-  font-size: 10px; padding: 3px 7px; border-radius: 999px; font-weight: 700; letter-spacing: 1px;
+.dice-flags .flag {
+  font-size: 9px; padding: 2px 6px; border-radius: 999px; font-weight: 700; letter-spacing: 1px;
   background: rgba(244,207,110,.18); color: var(--gold); border: 1px solid rgba(244,207,110,.4);
 }
 
@@ -422,6 +448,45 @@ body {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 10px; margin: 18px 0;
 }
+
+/* Generic prompt overlay (joker inherit / value exchange / soul steal / roll-off) */
+.prompt-body { margin: 14px 0; display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.prompt-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 6px; }
+.prompt-mini-row { display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap; }
+.prompt-mini-row .mini-card {
+  width: 56px; height: 78px; border-radius: 8px;
+  background: linear-gradient(145deg, #fff, #ece9ff); color: #1a1633;
+  display: grid; place-items: center;
+  font-family: 'Cinzel', serif; font-weight: 900; font-size: 18px;
+  box-shadow: 0 6px 16px rgba(0,0,0,.35);
+  border: 1px solid rgba(0,0,0,.1);
+}
+.prompt-mini-row .mini-card.red { color: #c42648; }
+.prompt-mini-row .mini-card.special { background: linear-gradient(145deg, #2a1a4f, #120825); color: var(--gold); }
+.prompt-mini-row .mini-card.back {
+  background:
+    repeating-linear-gradient(45deg, rgba(255,255,255,.08) 0 5px, transparent 5px 10px),
+    linear-gradient(145deg, #1f1747, #0a0820);
+  color: transparent;
+  border: 1px solid rgba(251,191,36,.35);
+  position: relative;
+}
+.prompt-mini-row .mini-card.back::after {
+  content: '\265E'; color: var(--gold); font-size: 22px;
+  position: absolute; inset: 0; display: grid; place-items: center;
+  text-shadow: 0 0 8px rgba(251,191,36,.6);
+}
+.prompt-mini-row .mini-card.dim { opacity: .35; }
+.prompt-target-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.prompt-target { background: rgba(20,16,48,.5); border: 1px solid rgba(251,191,36,.2); border-radius: 8px; padding: 10px; cursor: pointer; transition: transform .15s, border-color .15s; }
+.prompt-target:hover { transform: translateY(-2px); border-color: var(--gold); }
+.prompt-target b { display: block; margin-bottom: 4px; }
+.prompt-target .muted { font-size: 11px; }
+
+.rolloff-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.rolloff-cell { background: rgba(20,16,48,.5); border-radius: 8px; padding: 8px; text-align: center; border: 1px solid rgba(251,191,36,.18); }
+.rolloff-cell.winner { border-color: var(--gold); background: rgba(251,191,36,.1); }
+.rolloff-die { font-family: 'Cinzel', serif; font-size: 28px; color: var(--gold); margin-top: 4px; }
 .move-options button {
   padding: 14px;
   border-radius: 12px; border: 1px solid var(--glass-stroke);
@@ -594,12 +659,13 @@ body {
 }
 
 /* Notification (right column, replaces overlays for non-blocking events) */
-.notif { padding: 16px 18px; flex: 0 0 auto; }
+.notif { padding: 16px 18px; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .notif-title {
   font-family: 'Cinzel', serif; letter-spacing: 2px; font-size: 12px;
   color: var(--gold); margin-bottom: 10px; text-transform: uppercase;
+  flex: 0 0 auto;
 }
-.notif-body { font-size: 14px; color: var(--ink); }
+.notif-body { font-size: 14px; color: var(--ink); flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
 .notif-body p.muted { margin: 0; }
 .notif.flash { animation: notifFlash .6s ease; }
 @keyframes notifFlash {
@@ -607,6 +673,51 @@ body {
   40%  { box-shadow: 0 0 0 2px rgba(244,207,110,.7), 0 0 24px rgba(244,207,110,.5); }
   100% { box-shadow: var(--shadow-soft); }
 }
+
+/* Chronicle entries */
+.notif-entry {
+  border: 1px solid rgba(251,191,36,.18);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: rgba(20,16,48,.35);
+  animation: entryIn .35s ease;
+  position: relative;
+}
+.notif-entry + .notif-entry {
+  margin-top: 12px;
+}
+.notif-entry + .notif-entry::before {
+  content: '';
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  top: -7px;
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(244,207,110,.45), transparent);
+}
+@keyframes entryIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.notif-entry-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-family: 'Cinzel', serif; font-size: 11px; letter-spacing: .08em;
+  color: var(--gold); text-transform: uppercase; margin-bottom: 4px;
+}
+.notif-entry-time { color: var(--muted); font-size: 10px; letter-spacing: .04em; }
+.notif-entry-combat { border-color: rgba(244,207,110,.45); }
+.notif-entry-win { border-color: var(--gold); background: rgba(251,191,36,.08); }
+.notif-entry-action { border-color: rgba(244,207,110,.55); background: rgba(251,191,36,.06); }
+.notif-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; justify-content: flex-end; }
+.notif-actions .ghost-btn.small,
+.notif-actions .primary-btn.small { font-size: 11px; padding: 4px 10px; }
+.combat-who {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  font-size: 12px; color: var(--ink); margin-bottom: 6px;
+}
+.combat-who .who-vs { color: var(--gold); font-family: 'Cinzel', serif; font-size: 11px; }
+.combat-who .who-att, .combat-who .who-def { font-weight: 600; }
 .notif .notif-row {
   display: flex; align-items: center; gap: 10px; margin-top: 8px;
 }
@@ -644,6 +755,21 @@ body {
 .notif .joker-draws-row { display: flex; gap: 8px; align-items: center; }
 .notif .joker-draws .mini-card { width: 44px; height: 62px; font-size: 14px; }
 .notif .mini-card.highlight { outline: 3px solid var(--gold); box-shadow: 0 0 12px var(--gold), 0 6px 16px rgba(0,0,0,.35); transform: translateY(-2px); }
+
+/* ---------- Win notification (rendered into #notif on game over) ---------- */
+.win-notif { display: flex; flex-direction: column; gap: 12px; align-items: stretch; }
+.win-headline {
+  font-family: 'Cinzel', serif; font-size: 18px; letter-spacing: .04em; text-align: center;
+  text-shadow: 0 2px 6px rgba(0,0,0,.5);
+}
+.win-rank-list {
+  list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px;
+  background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.08); border-radius: 10px;
+  padding: 10px 12px;
+}
+.win-row { display: flex; align-items: center; gap: 10px; font-family: 'Cinzel', serif; letter-spacing: 1px; }
+.win-medal { font-size: 18px; min-width: 24px; text-align: center; }
+.win-restart-inline { align-self: center; padding: 8px 18px; }
 
 /* ---------- Deck/Discard piles ---------- */
 .piles { display: flex; gap: 16px; padding: 12px; align-items: stretch; justify-content: space-around; }
@@ -722,12 +848,121 @@ body {
 .room-slot .rs-actions button { padding: 6px 12px; font-size: 13px; }
 
 /* ---------- Responsive ---------- */
+
+/* Tablet / narrow desktop: stack columns vertically. */
 @media (max-width: 1100px) {
   .layout {
     grid-template-columns: 1fr;
+    height: auto;
+    min-height: calc(100vh - 90px);
   }
-  .side { flex-direction: row; flex-wrap: wrap; }
-  .dice-tray { flex: 1 1 100%; }
+  .side { flex-direction: row; flex-wrap: wrap; height: auto; overflow: visible; }
+  .side > * { flex: 1 1 240px; }
+  /* Board can grow wider when columns collapse. */
+  :root { --board-max-w: calc(100vw - 36px); }
+  .board-wrap { order: -1; }
+}
+
+/* ---------- Mobile (≤ 720px) ----------
+   Goal: board first and as large as possible; everything else stacks below it
+   in compact rows. Topbar shrinks. Notification/chronicle become collapsible
+   blocks with a max height so the page is scrollable but the board is always
+   visible without scrolling. */
+@media (max-width: 720px) {
+  :root {
+    /* Use viewport-min so the board is square-ish even in landscape. */
+    --board-max-w: calc(100vw - 12px);
+    --board-max-h: calc(100vh - 220px);
+    --cell: max(20px, min(48px,
+      calc(var(--board-max-w) / 15),
+      calc(var(--board-max-h) / 15)
+    ));
+  }
+
+  /* Topbar: tighter, single line, no subtitle. */
+  .topbar { padding: 8px 12px; }
+  .brand-text h1 { font-size: 18px; letter-spacing: 2px; }
+  .brand-text p { display: none; }
+  .topbar-actions .ghost-btn { padding: 7px 10px; font-size: 12px; }
+
+  /* Layout: full-width single column with tight gutters. */
+  .layout {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    padding: 6px 6px 12px;
+  }
+  .side { flex-direction: column; gap: 8px; }
+  .side > * { flex: 1 1 100%; }
+
+  /* Board comes first visually. */
+  .board-wrap { order: -1; padding: 0; }
+  .board { margin: 0 auto; }
+
+  /* Turn banner shrinks. */
+  .turn-banner { padding: 6px 12px; margin-top: 6px; }
+  .turn-name  { font-size: 13px; }
+  .turn-phase { font-size: 11px; }
+
+  /* Piles: side-by-side, compact. */
+  #piles { padding: 8px; gap: 10px; }
+  .pile-card, .pile-stack { width: 56px; height: 76px; }
+  .pile-card { font-size: 18px; }
+  .pile-card.back::after { font-size: 22px; }
+  .pile-label { font-size: 10px; }
+  .pile-count { font-size: 11px; }
+
+  /* Notification + chronicle: bounded height, scrollable internally. */
+  #notif { max-height: 220px; overflow: auto; }
+  .logbar { max-height: 180px; overflow: auto; }
+  .log    { max-height: 140px; }
+
+  /* In-stable info: shrink fonts so they fit a 20-30px cell. */
+  .stable-info .si-name { font-size: 10px; height: 16.6667%; padding: 0 2px; }
+  .stable-info .si-name .si-bot { font-size: 8px; margin-left: 2px; }
+  .stable-info .si-rank { font-size: 13px; min-width: 26px; padding: 0 6px; border-width: 1px; }
+  .stable-info .si-stats { left: 2%; right: 2%; gap: 2px; }
+  .stable-info .si-stat  { padding: 2px 1px; border-radius: 6px; }
+  .stable-info .si-stat b    { font-size: 14px; }
+  .stable-info .si-stat span { font-size: 7px; margin-top: 2px; letter-spacing: 0; }
+
+  /* Dice tray inside stable: very compact. */
+  .dice-stable { gap: 2px; left: 2%; right: 2%; }
+  .dice-stable .die { width: 22px; height: 22px; font-size: 12px; border-radius: 6px; }
+  .dice-stable .ds-row { gap: 4px; }
+  .dice-stable .dice-flags .flag { font-size: 7px; padding: 1px 4px; letter-spacing: .5px; }
+  .dice-stable .ds-buttons { gap: 4px; flex-wrap: wrap; }
+  .dice-stable .ds-buttons .primary-btn { padding: 3px 6px; font-size: 10px; border-radius: 6px; }
+  .dice-stable .ds-buttons .ghost-btn   { padding: 3px 6px; font-size: 9px;  border-radius: 6px; }
+
+  /* Horse glyph + lives must remain readable at small cell size. */
+  .horse { font-size: calc(var(--cell) * 0.55); }
+  .horse .lives i { width: calc(var(--cell) * 0.10); height: calc(var(--cell) * 0.10); }
+  .horse.reveal { font-size: calc(var(--cell) * 0.40); }
+
+  /* Cell home-step number shrinks proportionally. */
+  .cell.home-step::after { font-size: calc(var(--cell) * 0.34); }
+
+  /* Overlays: full-screen sheets, scroll if too tall. */
+  .overlay-card { width: 92vw; max-height: 86vh; overflow: auto; padding: 18px 16px; }
+  .overlay-card.wide, .overlay-card.tall { width: 92vw; max-width: 92vw; max-height: 86vh; }
+
+  /* Lobby/setup actions: stack vertically. */
+  .lobby-modes { gap: 8px; }
+  .lobby-join-row { flex-direction: column; }
+  .setup-actions { flex-direction: column; gap: 8px; }
+  .setup-actions button { width: 100%; }
+}
+
+/* ---------- Tiny phones (≤ 380px) ---------- */
+@media (max-width: 380px) {
+  :root { --cell: max(18px, min(28px, calc((100vw - 8px) / 15))); }
+  .topbar { padding: 6px 8px; }
+  .brand-text h1 { font-size: 15px; }
+  .stable-info .si-name { font-size: 8px; }
+  .stable-info .si-rank { font-size: 11px; min-width: 20px; padding: 0 4px; }
+  .stable-info .si-stat b { font-size: 11px; }
+  .stable-info .si-stat span { display: none; }
+  .dice-stable .die { width: 18px; height: 18px; font-size: 10px; }
 }
 
 /* ---------- In-stable player info overlay ---------- */
@@ -752,6 +987,15 @@ body {
 .stable-info.active {
   background: radial-gradient(ellipse at center, rgba(244,207,110,.10), transparent 70%);
   box-shadow: inset 0 0 0 1px rgba(244,207,110,.35);
+}
+
+/* Wrapper that holds name/rank/stats. The dice tray is a separate child of
+   .stable-info, so updating .si-content's innerHTML never touches the dice
+   (which would otherwise restart the rolling animation each rerender). */
+.stable-info .si-content {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
 /* Row 1 of stable (top 1/6): name */

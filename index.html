@@ -32,18 +32,8 @@
   </header>
 
   <main class="layout">
-    <!-- Left: dice tray, draw/discard piles, notification -->
+    <!-- Left: draw/discard piles, notification (dice live inside the active player's stable) -->
     <aside class="side side-left">
-      <div class="dice-tray glass">
-        <div class="dice-row">
-          <div id="die1" class="die"></div>
-          <div id="die2" class="die"></div>
-        </div>
-        <div class="dice-flags" id="dice-flags"></div>
-        <button id="btn-roll" class="primary-btn">🎲 Roll Dice</button>
-        <button id="btn-skip" class="ghost-btn small">Skip Move</button>
-      </div>
-
       <section id="piles" class="piles glass">
         <div class="pile">
           <div class="pile-label">Draw</div>
@@ -62,7 +52,7 @@
       </section>
 
       <section id="notif" class="notif glass">
-        <div class="notif-title" id="notif-title">Notification</div>
+        <div class="notif-title" id="notif-title">Chronicle</div>
         <div class="notif-body" id="notif-body">
           <p class="muted">Game events will appear here.</p>
         </div>
@@ -76,6 +66,18 @@
         <div class="stable-info" id="stable-info-C" data-faction="C"></div>
         <div class="stable-info" id="stable-info-A" data-faction="A"></div>
         <div class="stable-info" id="stable-info-B" data-faction="B"></div>
+      </div>
+      <!-- Dice tray (reparented into the active player's stable-info each render) -->
+      <div id="dice-tray" class="dice-stable">
+        <div class="ds-row">
+          <div id="die1" class="die"></div>
+          <div id="die2" class="die"></div>
+        </div>
+        <div class="dice-flags" id="dice-flags"></div>
+        <div class="ds-buttons">
+          <button id="btn-roll" class="primary-btn">🎲 Roll Dice</button>
+          <button id="btn-skip" class="ghost-btn small">Skip Move</button>
+        </div>
       </div>
       <div class="turn-banner">
         <div class="turn-name" id="turn-name">—</div>
@@ -99,6 +101,15 @@
       <p id="move-subtitle"></p>
       <div id="move-options" class="move-options"></div>
       <button class="ghost-btn" id="move-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Generic decision prompt overlay (inherit Joker, value exchange, soul steal, roll-off) -->
+  <div id="prompt-overlay" class="overlay hidden">
+    <div class="overlay-card glass" id="prompt-card">
+      <h3 id="prompt-title">Decision</h3>
+      <div id="prompt-body" class="prompt-body"></div>
+      <div id="prompt-actions" class="prompt-actions"></div>
     </div>
   </div>
 
@@ -132,15 +143,7 @@
     </div>
   </div>
 
-  <!-- Win overlay -->
-  <div id="win-overlay" class="overlay hidden">
-    <div class="overlay-card glass">
-      <h2 id="win-title">Victory!</h2>
-      <p id="win-sub"></p>
-      <ol id="win-rank" class="ranking"></ol>
-      <button class="primary-btn" id="win-restart">Play Again</button>
-    </div>
-  </div>
+  <!-- Win is rendered into the notification panel (#notif), no modal -->
 
   <!-- Rules overlay -->
   <div id="rules-overlay" class="overlay hidden">

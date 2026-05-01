@@ -11,14 +11,21 @@ import {
   pickGreedyMove, pickGreedyFreeExit,
   factionScore, computeStandings,
   redactStateForViewer, deserializeState, buildCombatPayloadFor,
+  performTurnOrderRollOff,
+  actInheritJoker,
+  valueExchangeEligibleHorses, actValueExchangeBegin, actValueExchangeDraw, actValueExchangeResolve,
+  soulStealHorseId, soulStealTargets, actSoulStealPeek, actSoulStealResolve,
+  actDeclineOffer,
 } from './game.js';
 import {
   buildBoard, renderHorses, renderPanels, renderDice, renderTurnBanner,
   renderLog, highlightTargets, clearTargets, shakeDice,
   showCard, showCombat, showMovePicker, showWin, cellRC,
-  renderDeckPile, showDiscardList,
+  renderDeckPile, showDiscardList, clearChronicle,
+  showPrompt, hidePrompt, miniCardsRowHtml, showRollOff,
+  appendChronicleAction,
 } from './ui.js';
-import { FACTION_INFO, FACTIONS } from './board.js';
+import { FACTION_INFO, FACTIONS, cardCompare } from './board.js';
 import * as lobby from './lobby.js';
 import * as net from './net.js';
 
@@ -28,6 +35,12 @@ function cardLabel(c) {
   if (c.kind === 'soul')  return 'Soul Stealer';
   const glyph = { S: '♠', C: '♣', D: '♦', H: '♥' }[c.suit];
   return `${c.rank}${glyph}`;
+}
+
+function factionDisplay(fac) {
+  if (!fac) return '';
+  const fInfo = (state && state.factions && state.factions[fac]) || null;
+  return fInfo ? fInfo.name : fac;
 }
 
 const boardEl = document.getElementById('board');
@@ -277,12 +290,15 @@ document.getElementById('room-start').addEventListener('click', () => {
 function startSolo() {
   mode = 'solo';
   state = newGame(playerConfig || undefined);
+  performTurnOrderRollOff(state);
   // In solo, "localFaction" stays null — refreshHorses uses every human faction.
   localFaction = null;
   selectedHorseId = null;
   botBusy = false;
+  clearChronicle();
   buildBoard(boardEl);
   rerender();
+  if (state.rollOff) showRollOff(state, state.rollOff);
   maybeRunBot();
 }
 
@@ -298,16 +314,20 @@ function onRoomStart() {
     }
     playerConfig = cfg;
     state = newGame(cfg);
+    performTurnOrderRollOff(state);
     localFaction = lobby.getMyFaction();
     selectedHorseId = null;
     botBusy = false;
+    clearChronicle();
     buildBoard(boardEl);
     rerender();
+    if (state.rollOff) showRollOff(state, state.rollOff);
     // Send first STATE to all guests so they can render even before the first action.
     broadcastState([]);
     maybeRunBot();
   } else if (mode === 'guest') {
     // Wait for the first STATE from host. Render an empty board placeholder.
+    clearChronicle();
     buildBoard(boardEl);
   }
 }
@@ -315,11 +335,14 @@ function onRoomStart() {
 function onGuestState(payload) {
   // payload = { state, notifs }
   const newState = deserializeState(payload.state);
+  const wasRollOff = !!(state && state.rollOff);
   state = newState;
   localFaction = state._localFaction;
   // Replay notifications received with this state.
   for (const n of (payload.notifs || [])) dispatchLocalNotif(n);
   rerender();
+  // Surface the roll-off summary the first time a guest receives a state with one.
+  if (!wasRollOff && state.rollOff) showRollOff(state, state.rollOff);
   if (state.winner) showWin(state, computeRanking(state));
 }
 
@@ -329,7 +352,7 @@ function dispatchLocalNotif(n) {
     const subtitle = `Only you can see this — ${cardLabel(n.card)}`;
     showCard(n.card, n.title || 'You drew a card', subtitle);
   } else if (n.type === 'combat') {
-    showCombat(n.att, n.def, n.text);
+    showCombat(n.att, n.def, n.text, 0, { attName: n.attName, defName: n.defName });
   }
 }
 
@@ -360,7 +383,12 @@ function buildNotifsForViewer(events, viewerFac) {
       out.push({ type: 'card', card: ev.card, title: 'You drew a card' });
     } else if (ev.type === 'combat') {
       const p = buildCombatPayloadFor(ev.combat, viewerFac);
-      if (p) out.push({ type: 'combat', att: p.att, def: p.def, text: p.text });
+      if (p) out.push({
+        type: 'combat',
+        att: p.att, def: p.def, text: p.text,
+        attName: factionDisplay(p.attFaction),
+        defName: factionDisplay(p.defFaction),
+      });
     }
   }
   return out;
@@ -381,6 +409,8 @@ function rerender() {
   renderDeckPile(state);
   refreshHorses();
   refreshActionButtons();
+  // Open or resume any pending interactive prompt for the local user.
+  maybeShowPendingPrompt();
 }
 
 function refreshHorses() {
@@ -434,8 +464,18 @@ function isLocalTurn() {
 function refreshActionButtons() {
   const btnRoll = document.getElementById('btn-roll');
   const btnSkip = document.getElementById('btn-skip');
-  if (!state) { btnRoll.style.display = 'none'; btnSkip.style.display = 'none'; return; }
-  const lock = !!state.winner || botBusy || !isLocalTurn();
+  const btnExc  = document.getElementById('btn-exchange');
+  const btnSoul = document.getElementById('btn-soul');
+  // Value Exchange & Soul Steal are now triggered automatically via chronicle entries.
+  if (btnExc) btnExc.classList.add('hidden');
+  if (btnSoul) btnSoul.classList.add('hidden');
+  if (!state) {
+    btnRoll.style.display = 'none'; btnSkip.style.display = 'none';
+    return;
+  }
+  const lock = !!state.winner || botBusy || !isLocalTurn() ||
+               !!state.pendingInherit || !!state.pendingOffer ||
+               !!state.pendingExchange || !!state.pendingSoul;
   const rollPhase = state.turn.phase === 'roll';
   const skipPhase = state.turn.phase === 'choose' || state.turn.phase === 'freeExit';
   btnRoll.style.display = (!lock && rollPhase) ? '' : 'none';
@@ -542,7 +582,9 @@ function actFreeExit(move) {
 // Host-side: handle remote ACTION messages from guests.
 async function onRemoteAction(faction, payload) {
   if (mode !== 'host' || !state || state.winner) return;
-  if (state.turn.player !== faction) return;            // ignore stale/wrong-player actions
+  // Some actions are tied to a pending prompt rather than the current turn.
+  const isPromptAction = payload && (payload.kind === 'INHERIT' || payload.kind === 'EXCHANGE_DRAW' || payload.kind === 'EXCHANGE_RESOLVE' || payload.kind === 'SOUL_PEEK' || payload.kind === 'SOUL_RESOLVE');
+  if (!isPromptAction && state.turn.player !== faction) return; // ignore stale/wrong-player actions
   if (botBusy) return;
   switch (payload.kind) {
     case 'ROLL':
@@ -553,7 +595,6 @@ async function onRemoteAction(faction, payload) {
       break;
     case 'MOVE':
       if (state.turn.phase === 'choose') {
-        // Verify move is legal
         const legal = legalMoves(state).find(m => m.horseId === payload.move.horseId && sameTarget(m.target, payload.move.target) && m.steps === payload.move.steps);
         if (legal) doApplyAndAdvance(legal);
       }
@@ -564,6 +605,79 @@ async function onRemoteAction(faction, payload) {
         if (legal) doApplyFreeExit(legal);
       }
       break;
+    case 'INHERIT': {
+      const p = state.pendingInherit;
+      const horse = p ? state.horses.find(h => h.id === p.attackerHorseId) : null;
+      if (p && horse && horse.faction === faction) {
+        actInheritJoker(state, !!payload.accept);
+        rerender();
+        broadcastState([]);
+      }
+      break;
+    }
+    case 'EXCHANGE_BEGIN': {
+      // Consume the auto-triggered pendingOffer for the current player.
+      const o = state.pendingOffer;
+      const horse = o && o.kind === 'exchange' ? state.horses.find(h => h.id === o.horseId) : null;
+      if (o && horse && horse.faction === faction) {
+        actValueExchangeBegin(state);
+        rerender();
+        broadcastState([]);
+      }
+      break;
+    }
+    case 'OFFER_DECLINE': {
+      const o = state.pendingOffer;
+      const horse = o ? state.horses.find(h => h.id === o.horseId) : null;
+      if (o && horse && horse.faction === faction) {
+        actDeclineOffer(state);
+        rerender();
+        broadcastState([]);
+        maybeRunBot();
+      }
+      break;
+    }
+    case 'EXCHANGE_DRAW': {
+      const p = state.pendingExchange;
+      const owner = p ? state.horses.find(h => h.id === p.horseId) : null;
+      if (p && owner && owner.faction === faction) {
+        actValueExchangeDraw(state);
+        rerender();
+        broadcastState([]);
+      }
+      break;
+    }
+    case 'EXCHANGE_RESOLVE': {
+      const p = state.pendingExchange;
+      const owner = p ? state.horses.find(h => h.id === p.horseId) : null;
+      if (p && owner && owner.faction === faction) {
+        actValueExchangeResolve(state, !!payload.accept);
+        // If declined and more draws remain, advance to the next draw automatically
+        // so the guest's UI can re-prompt on the next STATE.
+        if (state.pendingExchange) actValueExchangeDraw(state);
+        rerender();
+        broadcastState([]);
+      }
+      break;
+    }
+    case 'SOUL_PEEK': {
+      if (faction === state.turn.player && soulStealHorseId(state) != null) {
+        actSoulStealPeek(state, payload.targetHorseId);
+        rerender();
+        broadcastState([]);
+      }
+      break;
+    }
+    case 'SOUL_RESOLVE': {
+      const p = state.pendingSoul;
+      const owner = p ? state.horses.find(h => h.id === p.horseId) : null;
+      if (p && owner && owner.faction === faction) {
+        actSoulStealResolve(state, !!payload.steal);
+        rerender();
+        broadcastState([]);
+      }
+      break;
+    }
   }
 }
 
@@ -605,6 +719,14 @@ function doSkipOrDecline() {
 async function doApplyAndAdvance(move) {
   await doApply(move);
   if (state.winner) return;
+  // If the move opened an interactive prompt (e.g. Value Exchange offer crossing
+  // halfway, or a Joker inheritance), defer endTurn until the prompt is resolved.
+  if (state.pendingOffer || state.pendingExchange || state.pendingSoul || state.pendingInherit) {
+    state._endTurnAfterPrompt = true;
+    rerender();
+    broadcastState([]);
+    return;
+  }
   endTurn(state);
   rerender();
   broadcastState([]);
@@ -645,18 +767,26 @@ async function doApply(move) {
   if (result.combat) {
     events.push({ type: 'combat', combat: result.combat });
     // Show locally with the appropriate viewer-faction view.
+    // - solo: viewer = the set of non-bot (human) factions sitting at this screen.
+    //         If any human is a participant, show real cards; otherwise censor
+    //         winner card (third-party view of a bot-vs-bot fight).
+    // - pvp:  viewer = this client's own faction.
     const localViewer = mode === 'solo'
-      ? null   // solo: show real cards (every human knows everything)
+      ? new Set(
+          Object.entries(state.factions)
+            .filter(([, f]) => f && !f.bot)
+            .map(([fac]) => fac)
+        )
       : localFaction;
-    let att = result.combat.attacker.card;
-    let def = result.combat.defender.card;
-    if (localViewer) {
-      const p = buildCombatPayloadFor(result.combat, localViewer);
-      att = p.att; def = p.def;
-    }
+    const p = buildCombatPayloadFor(result.combat, localViewer);
+    const att = p.att;
+    const def = p.def;
     const currentIsBot = state.factions[state.turn.player] && state.factions[state.turn.player].bot;
     const auto = currentIsBot ? 1800 : 0;
-    await showCombat(att, def, result.combat.text, auto);
+    await showCombat(att, def, result.combat.text, auto, {
+      attName: factionDisplay(p.attFaction),
+      defName: factionDisplay(p.defFaction),
+    });
     rerender();
   }
 
@@ -669,8 +799,266 @@ async function doApply(move) {
 }
 
 // =====================================================================
-// BUTTONS
+// INTERACTIVE PROMPT FLOWS (joker inherit / value exchange / soul steal)
 // =====================================================================
+
+// Returns true if the local user owns the horse referenced by an open prompt.
+function isPromptForLocal(p) {
+  if (!p) return false;
+  const horseId = p.attackerHorseId ?? p.horseId;
+  const horse = state.horses.find(h => h.id === horseId);
+  if (!horse) return false;
+  if (mode === 'solo') {
+    const fac = state.factions[horse.faction];
+    return !!(fac && !fac.bot);
+  }
+  return horse.faction === localFaction;
+}
+
+// Track which pending prompt we've already surfaced (per state instance) to avoid duplicates.
+let promptOpen = false;
+let lastOfferShownKey = null;
+
+function offerKey(o) {
+  if (!o) return null;
+  return `${o.kind}:${o.horseId}`;
+}
+
+async function maybeShowPendingPrompt() {
+  if (promptOpen) return;
+  if (!state || state.winner) return;
+
+  // 1. Joker inherit prompt (modal overlay).
+  if (state.pendingInherit && isPromptForLocal(state.pendingInherit)) {
+    promptOpen = true;
+    try { await openInheritPrompt(); } finally { promptOpen = false; }
+    queueMicrotask(() => maybeShowPendingPrompt());
+    return;
+  }
+
+  // 2. Auto-triggered offer (Value Exchange / Soul Steal) \u2014 surfaced as a chronicle action.
+  if (state.pendingOffer && isPromptForLocal(state.pendingOffer)) {
+    const key = offerKey(state.pendingOffer);
+    if (key !== lastOfferShownKey) {
+      lastOfferShownKey = key;
+      promptOpen = true;
+      try { await openOfferChronicle(state.pendingOffer); } finally { promptOpen = false; }
+      // The chronicle action may have surfaced a follow-up prompt
+      // (e.g. accepting Value Exchange opens the draw modal). Re-check.
+      queueMicrotask(() => maybeShowPendingPrompt());
+    }
+    return;
+  }
+  if (!state.pendingOffer) lastOfferShownKey = null;
+
+  // 3. In-progress Value Exchange (draw decisions).
+  if (state.pendingExchange && isPromptForLocal(state.pendingExchange)) {
+    promptOpen = true;
+    try { await runValueExchangeLoop(); } finally { promptOpen = false; }
+    queueMicrotask(() => maybeShowPendingPrompt());
+    return;
+  }
+
+  // 4. In-progress Soul Steal (steal/pass after peek).
+  if (state.pendingSoul && isPromptForLocal(state.pendingSoul)) {
+    promptOpen = true;
+    try { await runSoulStealResolveLoop(); } finally { promptOpen = false; }
+    queueMicrotask(() => maybeShowPendingPrompt());
+    return;
+  }
+}
+
+async function openInheritPrompt() {
+  const p = state.pendingInherit;
+  if (!p) return;
+  const jokerHtml = miniCardsRowHtml([p.jokerCard]);
+  const choice = await showPrompt({
+    title: '\ud83c\udccf Inherit the Joker?',
+    bodyHtml: `
+      <p>You defeated a Joker. You may take it as your horse's new card; your old card will be publicly discarded.</p>
+      ${jokerHtml}
+    `,
+    actions: [
+      { label: 'Decline (discard Joker)', value: false },
+      { label: 'Inherit Joker', value: true, primary: true },
+    ],
+  });
+  if (mode === 'guest') {
+    lobby.sendActionToHost({ kind: 'INHERIT', accept: !!choice });
+  } else {
+    actInheritJoker(state, !!choice);
+    rerender();
+    broadcastState([]);
+    maybeRunBot();
+  }
+}
+
+// Surface an auto-triggered offer (\u00a77 Value Exchange / \u00a710 Soul Steal) as
+// an interactive chronicle entry that the player can act on from the left column.
+async function openOfferChronicle(offer) {
+  const horse = state.horses.find(h => h.id === offer.horseId);
+  if (!horse) return;
+  if (offer.kind === 'exchange') {
+    const choice = await appendChronicleAction(
+      'offer-exchange',
+      '\u21bb Value Exchange offered',
+      `<p>Your horse just crossed the halfway mark with a card.
+        You may draw up to 3 new cards and swap it for one of them.
+        This is a one-time offer.</p>`,
+      [
+        { label: 'Decline', value: 'decline' },
+        { label: 'Begin Value Exchange', value: 'begin', primary: true },
+      ],
+    );
+    if (choice === 'begin') {
+      if (mode === 'guest') {
+        lobby.sendActionToHost({ kind: 'EXCHANGE_BEGIN' });
+      } else {
+        actValueExchangeBegin(state);
+        rerender();
+        broadcastState([]);
+      }
+    } else {
+      if (mode === 'guest') {
+        lobby.sendActionToHost({ kind: 'OFFER_DECLINE' });
+      } else {
+        actDeclineOffer(state);
+        rerender();
+        broadcastState([]);
+        maybeRunBot();
+      }
+    }
+    return;
+  }
+  if (offer.kind === 'soul') {
+    const choice = await appendChronicleAction(
+      'offer-soul',
+      '\ud83d\udc41 Soul Steal offered',
+      `<p>You hold the Soul Steal card. You may peek at one enemy horse's card,
+        then choose to steal it (target sent home) or pass.
+        This is a one-time offer for this turn.</p>`,
+      [
+        { label: 'Decline', value: 'decline' },
+        { label: 'Pick a target\u2026', value: 'begin', primary: true },
+      ],
+    );
+    if (choice === 'begin') {
+      await openSoulStealTargetPicker(offer);
+    } else {
+      if (mode === 'guest') {
+        lobby.sendActionToHost({ kind: 'OFFER_DECLINE' });
+      } else {
+        actDeclineOffer(state);
+        rerender();
+        broadcastState([]);
+        maybeRunBot();
+      }
+    }
+  }
+}
+
+async function openSoulStealTargetPicker(offer) {
+  const targets = soulStealTargets(state);
+  if (targets.length === 0) {
+    await showPrompt({
+      title: '\ud83d\udc41 Soul Steal',
+      bodyHtml: '<p>No valid enemy horses to peek at right now (all known or none on the track).</p>',
+      actions: [{ label: 'Close', value: null, primary: true }],
+    });
+    // Decline since there is nothing to do.
+    if (mode === 'guest') lobby.sendActionToHost({ kind: 'OFFER_DECLINE' });
+    else { actDeclineOffer(state); rerender(); broadcastState([]); maybeRunBot(); }
+    return;
+  }
+  const opts = targets.map(id => {
+    const h = state.horses.find(x => x.id === id);
+    return { label: `${factionDisplay(h.faction)} \u2022 Horse #${h.slot + 1}`, value: id };
+  });
+  opts.push({ label: 'Cancel', value: null });
+  const targetId = await showPrompt({
+    title: '\ud83d\udc41 Soul Steal \u2014 pick a target',
+    bodyHtml: '<p>Select an enemy horse on the track. Their card will be revealed to you.</p>',
+    actions: opts.map(o => ({ label: o.label, value: o.value, primary: o.value !== null })),
+  });
+  if (targetId == null) {
+    // Re-surface the offer so the player can change their mind.
+    lastOfferShownKey = null;
+    rerender();
+    return;
+  }
+  if (mode === 'guest') {
+    lobby.sendActionToHost({ kind: 'SOUL_PEEK', targetHorseId: targetId });
+  } else {
+    actSoulStealPeek(state, targetId);
+    rerender();
+    broadcastState([]);
+  }
+}
+
+async function runValueExchangeLoop() {
+  // Loops as long as state.pendingExchange exists and belongs to the local user.
+  while (state.pendingExchange && isPromptForLocal(state.pendingExchange)) {
+    const p = state.pendingExchange;
+    const drawn = p.drawn || [];
+    const lastCard = drawn[drawn.length - 1];
+    if (!lastCard) break;
+    const choice = await showPrompt({
+      title: `\u21bb Value Exchange (draw ${drawn.length}/3)`,
+      bodyHtml: `
+        <p>You drew this card. Accept to swap; decline to ${p.remaining > 0 ? 'try the next draw' : 'keep your original card'}.</p>
+        ${miniCardsRowHtml(drawn, { highlightLast: true })}
+      `,
+      actions: [
+        ...(p.remaining > 0 ? [{ label: 'Decline (draw next)', value: 'decline' }] : [{ label: 'Decline (keep original)', value: 'decline' }]),
+        { label: 'Accept this card', value: 'accept', primary: true },
+      ],
+    });
+    if (mode === 'guest') {
+      lobby.sendActionToHost({ kind: 'EXCHANGE_RESOLVE', accept: choice === 'accept' });
+      return;
+    }
+    actValueExchangeResolve(state, choice === 'accept');
+    if (state.pendingExchange) {
+      // declined and more draws left \u2192 draw next
+      actValueExchangeDraw(state);
+    }
+    rerender();
+    broadcastState([]);
+  }
+  rerender();
+  maybeRunBot();
+}
+
+async function runSoulStealResolveLoop() {
+  while (state.pendingSoul && isPromptForLocal(state.pendingSoul)) {
+    const p = state.pendingSoul;
+    const target = state.horses.find(h => h.id === p.peekedHorseId);
+    if (!target) return;
+    const card = target.card;
+    const choice = await showPrompt({
+      title: '\ud83d\udc41 Soul Steal \u2014 peeked',
+      bodyHtml: `
+        <p>You see your target's card. Steal it (target sent home, you take the card) or pass.</p>
+        ${miniCardsRowHtml([card])}
+      `,
+      actions: [
+        { label: 'Pass', value: 'pass' },
+        { label: 'Steal', value: 'steal', primary: true },
+      ],
+    });
+    if (mode === 'guest') {
+      lobby.sendActionToHost({ kind: 'SOUL_RESOLVE', steal: choice === 'steal' });
+      return;
+    }
+    actSoulStealResolve(state, choice === 'steal');
+    rerender();
+    broadcastState([]);
+  }
+  rerender();
+  maybeRunBot();
+}
+
+
 
 document.getElementById('btn-roll').addEventListener('click', () => {
   if (!state || state.winner || state.turn.phase !== 'roll') return;
@@ -684,13 +1072,21 @@ document.getElementById('btn-skip').addEventListener('click', () => {
   actSkip();
 });
 
+// Value Exchange & Soul Steal buttons are no longer used \u2014 the events trigger
+// automatically and surface as actionable chronicle entries. Keep the click
+// handlers as no-ops so old keyboard shortcuts / focused buttons remain inert.
+const _exBtn = document.getElementById('btn-exchange');
+if (_exBtn) _exBtn.addEventListener('click', (e) => e.preventDefault());
+const _slBtn = document.getElementById('btn-soul');
+if (_slBtn) _slBtn.addEventListener('click', (e) => e.preventDefault());
+
 document.getElementById('btn-restart').addEventListener('click', () => {
   selectedHorseId = null;
   net.disconnect();
   location.search = '';
 });
-document.getElementById('win-restart').addEventListener('click', () => {
-  document.getElementById('win-overlay').classList.add('hidden');
+window.addEventListener('seahorse:restart', () => {
+  selectedHorseId = null;
   net.disconnect();
   location.search = '';
 });
@@ -787,7 +1183,16 @@ document.getElementById('setup-start').addEventListener('click', () => {
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
 async function maybeRunBot() {
-  if (!state || state.winner || botBusy) return;
+  if (!state || state.winner) return;
+  // If a previous turn's endTurn was deferred until a prompt resolved, complete it now.
+  if (state._endTurnAfterPrompt &&
+      !state.pendingOffer && !state.pendingExchange && !state.pendingSoul && !state.pendingInherit) {
+    state._endTurnAfterPrompt = false;
+    endTurn(state);
+    rerender();
+    broadcastState([]);
+  }
+  if (botBusy) return;
   if (mode === 'guest') return;
   const fac = state.factions[state.turn.player];
   if (!fac || !fac.bot) return;
@@ -798,6 +1203,67 @@ async function maybeRunBot() {
       const f = state.turn.player;
       const cur = state.factions[f];
       if (!cur || !cur.bot) break;
+
+      // If the previous action deferred endTurn pending a prompt, and the prompt
+      // is now resolved, end the turn before doing anything else.
+      if (state._endTurnAfterPrompt &&
+          !state.pendingOffer && !state.pendingExchange && !state.pendingSoul && !state.pendingInherit) {
+        state._endTurnAfterPrompt = false;
+        endTurn(state);
+        rerender();
+        broadcastState([]);
+        continue;
+      }
+
+      // Bots act greedily on auto-triggered offers (\u00a77 Value Exchange / \u00a710 Soul Steal):
+      // accept the offer to peek/draw, then accept the result if it's strictly better.
+      if (state.pendingOffer) {
+        const o = state.pendingOffer;
+        if (o.kind === 'exchange') {
+          actValueExchangeBegin(state);              // draws first card
+          rerender(); broadcastState([]);
+          continue;
+        }
+        if (o.kind === 'soul') {
+          const targets = soulStealTargets(state);
+          if (targets.length === 0) {
+            actDeclineOffer(state);
+          } else {
+            // Pick the target whose currently-known value is highest (best to peek).
+            // Since we don't know the cards, just pick the first target.
+            actSoulStealPeek(state, targets[0]);
+          }
+          rerender(); broadcastState([]);
+          continue;
+        }
+      }
+
+      // Bot in the middle of a Value Exchange draw cycle: accept iff the latest
+      // drawn card beats the horse's current card; otherwise decline (and the
+      // engine will draw the next card if any remain).
+      if (state.pendingExchange) {
+        const p = state.pendingExchange;
+        const horse = state.horses.find(h => h.id === p.horseId);
+        const drawn = p.drawn[p.drawn.length - 1];
+        const better = horse && horse.card && drawn && cardCompare(drawn, horse.card) > 0;
+        actValueExchangeResolve(state, !!better);
+        if (state.pendingExchange) actValueExchangeDraw(state);   // declined, more left
+        rerender(); broadcastState([]);
+        continue;
+      }
+
+      // Bot in the middle of a Soul Steal peek decision: steal only when the
+      // peeked card's value is high enough to be worth giving up the soul card.
+      // Threshold: value >= 10 (10/J/Q/K/A or Jokers).
+      if (state.pendingSoul) {
+        const p = state.pendingSoul;
+        const target = state.horses.find(h => h.id === p.peekedHorseId);
+        const v = target && target.card ? (target.card._jokerValue ?? target.card.value ?? 0) : 0;
+        const steal = v >= 10;
+        actSoulStealResolve(state, steal);
+        rerender(); broadcastState([]);
+        continue;
+      }
 
       if (state.turn.phase === 'freeExit') {
         const fm = pickGreedyFreeExit(state);
@@ -835,6 +1301,14 @@ async function maybeRunBot() {
           continue;
         }
         await doApply(move);
+        // Defer endTurn if the move opened a pending prompt; the bot's loop
+        // will resolve it on the next iteration and then end the turn.
+        if (state.pendingOffer || state.pendingExchange || state.pendingSoul || state.pendingInherit) {
+          state._endTurnAfterPrompt = true;
+          rerender();
+          broadcastState([]);
+          continue;
+        }
         endTurn(state);
         rerender();
         broadcastState([]);

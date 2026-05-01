@@ -41,8 +41,8 @@ I......6.......
 
 ## 1 · Determining Turn Order
 
-Each player rolls one die; highest result goes first.
-Ties among the top scorers are broken by a re-roll between those players only.
+The first player is chosen **at random**. Play then proceeds in the standard
+**counter-clockwise** order around the table from that player.
 
 ---
 
@@ -146,6 +146,13 @@ Once a horse has **passed the halfway point** of the main track, its owner may �
 2. After each draw, decide to **accept** (take it as the new card) or **decline** (see next).
 3. Stop as soon as one card is accepted, or after all 3 are declined (keep the original card).
 
+### Card flow during Value Exchange
+
+- **Cards not chosen** — declined draws and (on accept) the earlier declined draws —
+  are returned to the **draw pile** and the deck is **shuffled**. They stay private; no other player learns what was drawn.
+- **Only on accept**: the horse's **old card** is publicly **discarded** and the accepted card becomes the new (face-down) card.
+- If all 3 draws are declined, the original card is kept and **all 3 drawn cards** go back to the deck and are shuffled.
+
 ---
 
 ## 8 · Home Stretch
@@ -171,8 +178,16 @@ Horses inside the home stretch are **immune to combat**.
 
 ## 9 · Joker Cards
 
-- **Joker value is dynamic**: each time a Joker is in combat, draw 3 cards and use the highest
-  as its value for that fight.
+- **Joker value is dynamic**: each time a Joker is in combat, draw cards from the deck
+  until **3 normal value cards** (i.e. not the other Joker and not the Soul Steal card)
+  have been drawn. The highest value among those 3 is the Joker's combat value for that fight.
+  - If a Joker or the Soul Steal card is drawn during this process, it does **not** count
+    toward the 3 — keep drawing until 3 valued cards are obtained.
+  - **All cards drawn during this resolution** (the 3 valued cards plus any Jokers /
+    Soul Steal encountered along the way) are **publicly discarded** afterwards —
+    every player has now seen them.
+  - The combat notification displays **all** drawn cards in order, with the highest-value
+    one **highlighted** as the Joker's effective value for this fight.
 - A Joker has **3 lives** like any normal horse.
 
 | Joker situation | Result |

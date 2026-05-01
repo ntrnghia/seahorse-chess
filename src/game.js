@@ -1,6 +1,6 @@
 // Pure game logic. State is a plain object the UI reads & dispatches into.
 import {
-  FACTIONS, TRACK, TRACK_LEN, EXIT_INDEX, HOME, HOME_ENTRY_INDEX,
+  FACTIONS, TRACK, TRACK_LEN, EXIT_INDEX, HOME, HOME_ENTRY_INDEX, HALFWAY,
   buildDeck, cardCompare, cardLabel as describeCard,
 } from './board.js';
 
@@ -20,6 +20,7 @@ export function newGame(playerConfig) {
         position: { type: 'stable', slot: i },
         lives: 3,
         card: null,
+        veOffered: false,                // §7: has Value Exchange already been offered for this horse?
       });
     }
   }
@@ -33,6 +34,7 @@ export function newGame(playerConfig) {
       consecutiveExitFails: 0,
       pendingFreeExit: false,
       eliminated: false,
+      soulOfferedThisTurn: false,        // §10: has Soul Steal already been offered this turn?
     }])),
     turn: {
       player: FACTIONS[0],
@@ -41,9 +43,14 @@ export function newGame(playerConfig) {
       bonusTurns: 0,                     // additional turns earned (e.g. exit roll)
       didFreeExit: false,
     },
+    rollOff: null,                       // §1: { rolls:{A,B,C,D}, ties:[...], history:[{round, rolls}], done:false }
     log: [],
     winner: null,
     movesThisTurn: 0,
+    pendingInherit: null,    // { attackerHorseId, jokerCardId, oldCardId } when a human attacker may inherit a Joker
+    pendingOffer: null,      // { kind:'exchange'|'soul', horseId } — auto-triggered offer awaiting begin/decline
+    pendingExchange: null,   // { horseId, drawn:[card], remaining:int } during a value-exchange action
+    pendingSoul: null,       // { horseId, peekedHorseId } after a Soul Steal peek, before steal/pass decision
   };
 }
 
@@ -58,6 +65,25 @@ function shuffle(arr) {
 }
 
 export function rollDie() { return 1 + Math.floor(Math.random() * 6); }
+
+// =====================================================================
+// §1 Turn-order roll-off (simplified)
+// =====================================================================
+// Randomly chooses the first player. The remaining factions follow in the
+// standard counter-clockwise order (FACTIONS), wrapping around. Stores the
+// chosen first faction and full order on state.rollOff for the chronicle.
+export function performTurnOrderRollOff(state) {
+  const first = FACTIONS[Math.floor(Math.random() * FACTIONS.length)];
+  const startIdx = FACTIONS.indexOf(first);
+  const order = [];
+  for (let i = 0; i < FACTIONS.length; i++) {
+    order.push(FACTIONS[(startIdx + i) % FACTIONS.length]);
+  }
+  state.rollOff = { first, order, done: true };
+  state.turn.player = order[0];
+  log(state, 'system', `First player chosen at random: <b>${first}</b>. Turn order: ${order.join(' → ')}.`);
+  return state.rollOff;
+}
 
 function drawCard(state) {
   if (state.deck.length === 0) {
@@ -201,6 +227,10 @@ function pathFor(state, horse, steps) {
             });
           }
         }
+        // RULE: a horse that has reached its home entry cannot continue on the
+        // track (no second lap, no walking back through its own exit cell).
+        // Its only legal continuation is to enter home — already handled above.
+        return results;
       }
 
       // Block check: enemy on next track cell blocks unless we land exactly there
@@ -277,6 +307,8 @@ export function legalMoves(state) {
 // ---------- Apply move ----------
 // Returns { combat?: {attacker, defenders, result}, won?: bool }
 export function applyMove(state, move) {
+  // Block movement while an interactive prompt is open (joker inherit / exchange / soul steal).
+  if (state.pendingInherit || state.pendingOffer || state.pendingExchange || state.pendingSoul) return {};
   const t = state.turn;
   const horse = state.horses.find(h => h.id === move.horseId);
   if (!horse) return {};
@@ -318,6 +350,20 @@ export function applyMove(state, move) {
 
   state.movesThisTurn++;
 
+  // §7 Value Exchange auto-offer: if this horse just landed past halfway with a card
+  // and hasn't been offered yet, raise a one-time offer for its owner to swap.
+  if (
+    horse.position.type === 'track' &&
+    horse.card &&
+    !horse.veOffered &&
+    pastHalfway(horse.faction, horse) &&
+    !state.pendingOffer && !state.pendingExchange && !state.pendingSoul && !state.pendingInherit
+  ) {
+    horse.veOffered = true;
+    state.pendingOffer = { kind: 'exchange', horseId: horse.id };
+    log(state, horse.faction, `crossed the halfway mark \u2014 Value Exchange available!`);
+  }
+
   // Check win
   if (checkWin(state, horse.faction)) {
     state.winner = horse.faction;
@@ -341,17 +387,100 @@ function maybeResolveCombat(state, attacker, trackIndex) {
   const att = resolveCombatCard(state, attacker);
   const defs = defenders.map(d => ({ horse: d, card: resolveCombatCard(state, d) }));
 
-  // Find strongest defender
-  defs.sort((a, b) => cardCompare(b.card, a.card));
+  // §9 special-case: Red Joker vs Black Joker among defenders.
+  // - Red Joker always WINS the head-to-head against Black Joker.
+  // - When the attacker is the Black Joker fighting a Red Joker defender,
+  //   the result is kamikaze (both sent back).
+  // We pre-empt the generic strongest-defender path here.
+  const attIsJoker = att && att.kind === 'joker';
+  const attIsRed   = attIsJoker && attacker.card && attacker.card.color === 'red';
+  const attIsBlack = attIsJoker && attacker.card && attacker.card.color === 'black';
+  const defJokers = defs.filter(d => d.card && d.card.kind === 'joker');
+  const defRed    = defJokers.find(d => d.horse.card && d.horse.card.color === 'red');
+  const defBlack  = defJokers.find(d => d.horse.card && d.horse.card.color === 'black');
+
+  // Defender ordering: Red Joker outranks every other defender card (incl. Black Joker).
+  defs.sort((a, b) => {
+    const aIsRedJ = a.card && a.card.kind === 'joker' && a.horse.card && a.horse.card.color === 'red';
+    const bIsRedJ = b.card && b.card.kind === 'joker' && b.horse.card && b.horse.card.color === 'red';
+    if (aIsRedJ && !bIsRedJ) return -1;
+    if (!aIsRedJ && bIsRedJ) return 1;
+    return cardCompare(b.card, a.card);
+  });
   const strongest = defs[0];
 
+  // Detect Black-attacker vs Red-defender kamikaze BEFORE generic resolution.
+  const blackAttVsRedDef = attIsBlack && defRed;
+  // Detect Red-attacker vs Black-defender (Red wins regardless of dynamic value).
+  const redAttVsBlackDef = attIsRed && defBlack && !defRed;
+
+  let attackerWins;
+  let kamikazeJokerVsJoker = false;
+  if (blackAttVsRedDef) {
+    attackerWins = false;
+    kamikazeJokerVsJoker = true;
+  } else if (redAttVsBlackDef) {
+    attackerWins = true;
+  } else {
+    attackerWins = cardCompare(att, strongest.card) > 0;
+  }
+
   let resultText;
-  if (cardCompare(att, strongest.card) > 0) {
-    // Attacker beats all defenders → all defenders sent to stable
+  let inheritedJoker = null; // The joker card the attacker inherits (if any)
+  if (attackerWins) {
+    // Attacker beats all defenders → all defenders sent to stable.
+    // Per §9: if attacker kills a Joker, attacker MAY choose to become a Joker.
+    // - Bots auto-accept (Joker dominates almost any alternative).
+    // - Humans receive a deferred prompt via state.pendingInherit; the joker
+    //   is held in escrow until they choose accept/decline.
+    const jokerDefs = defs.filter(d => d.card && d.card.kind === 'joker');
+    let inheritPrompt = false;
+    if (jokerDefs.length > 0 && attacker.card) {
+      jokerDefs.sort((a, b) => (b.card._jokerValue ?? 0) - (a.card._jokerValue ?? 0));
+      const chosen = jokerDefs[0];
+      // Pop the joker card off the defender so sendBackToStable doesn't discard it.
+      const jokerCard = chosen.horse.card; // raw joker card (no _jokerValue/_jokerDraws)
+      chosen.horse.card = null;
+      const attackerIsBot = !!(state.factions[attacker.faction] && state.factions[attacker.faction].bot);
+      if (attackerIsBot) {
+        // Auto-accept: discard old card, attacker takes the joker.
+        // Inheriting a Joker is a public event — everyone sees it from now on.
+        discardCard(state, attacker.card);
+        inheritedJoker = jokerCard;
+        attacker.card = jokerCard;
+        attacker.cardSeenBy = new Set(FACTIONS);
+      } else {
+        // Defer: stash the joker on state.pendingInherit; attacker keeps old card for now.
+        state.pendingInherit = {
+          attackerHorseId: attacker.id,
+          jokerCard,
+          oldCardId: attacker.card.id,
+          // Witness factions are all factions — if accepted, the inherited Joker
+          // is publicly known going forward.
+          witnessFactions: [...FACTIONS],
+        };
+        inheritPrompt = true;
+      }
+    }
     for (const d of defs) sendBackToStable(state, d.horse);
     resultText = `Attacker wins! All ${defs.length} defender(s) sent back to their stable.`;
+    if (inheritedJoker) {
+      resultText += ` Attacker inherits the Joker!`;
+    } else if (inheritPrompt) {
+      resultText += ` Attacker may choose to inherit the Joker.`;
+    }
+  } else if (kamikazeJokerVsJoker) {
+    // Black-attacker Joker vs Red-defender Joker → both sent back, no life loss.
+    sendBackToStable(state, attacker);
+    sendBackToStable(state, defRed.horse);
+    resultText = `Black Joker rams the Red Joker — both are sent back!`;
+  } else if (attIsJoker) {
+    // §9: Joker as ATTACKER losing → kamikaze with strongest defender (no life loss).
+    sendBackToStable(state, attacker);
+    sendBackToStable(state, strongest.horse);
+    resultText = `Joker attacker loses — both horses are sent back (kamikaze)!`;
   } else {
-    // Attacker loses to strongest defender
+    // Attacker loses to strongest defender (normal kamikaze-life rule).
     if (strongest.horse.lives === 1) {
       // Both sent back
       sendBackToStable(state, attacker);
@@ -385,6 +514,7 @@ function maybeResolveCombat(state, attacker, trackIndex) {
     defender: { horse: strongest.horse, card: strongest.card },
     allDefenders: defs.map(d => ({ horse: d.horse, card: d.card })),
     text: resultText,
+    inheritedJoker: inheritedJoker || null,
   };
 }
 
@@ -392,20 +522,30 @@ function resolveCombatCard(state, horse) {
   const c = horse.card;
   if (!c) return { value: 0, kind: 'none' };
   if (c.kind === 'joker') {
-    // Draw 3, take highest value (jokers also drawn? simpler: only normal/soul values).
-    let best = 0;
-    const drawn = [];
-    for (let i = 0; i < 3; i++) {
+    // §9: draw cards until 3 *valued* cards have been collected. Jokers and
+    // Soul Steal cards drawn along the way do NOT count toward the 3 —
+    // keep drawing until 3 normal-value cards are obtained.
+    // All cards drawn during this resolution (incl. encountered specials)
+    // are publicly discarded afterwards: every player has now seen them.
+    const drawn = [];     // every card drawn (in order)
+    const valued = [];    // only the normal-value cards (used to compute best)
+    while (valued.length < 3) {
       if (state.deck.length === 0) {
+        if (state.discard.length === 0) break; // safety: no cards anywhere
         state.deck = shuffle(state.discard);
         state.discard = [];
       }
       const d = state.deck.pop();
       drawn.push(d);
-      const v = d.kind === 'joker' ? 14 : (d.value ?? 0);
-      if (v > best) best = v;
+      const isSpecial = d.kind === 'joker' || d.kind === 'soul';
+      if (!isSpecial) valued.push(d);
     }
-    // Return drawn cards back to discard for now
+    let best = 0;
+    for (const v of valued) {
+      const vv = v.value ?? 0;
+      if (vv > best) best = vv;
+    }
+    // Publicly discard every card drawn during the joker resolution.
     for (const d of drawn) state.discard.push(d);
     return { ...c, _jokerValue: best, _jokerDraws: drawn };
   }
@@ -438,6 +578,17 @@ export function checkWin(state, faction) {
 // ---------- Turn flow ----------
 export function endTurn(state) {
   if (state.winner) return;
+  // §7/§10: a one-time offer is bound to the active turn. If it's still open
+  // when the turn ends (e.g. a bot moved on past the halfway mark without acting,
+  // or a human ignored it), drop it so it doesn't leak into the next player's turn.
+  if (state.pendingOffer) {
+    const o = state.pendingOffer;
+    const horse = state.horses.find(h => h.id === o.horseId);
+    const fac = horse ? horse.faction : 'system';
+    if (o.kind === 'exchange') log(state, fac, `let the Value Exchange offer expire.`);
+    else if (o.kind === 'soul') log(state, fac, `let the Soul Steal offer expire.`);
+    state.pendingOffer = null;
+  }
   const t = state.turn;
   const f = t.player;
 
@@ -468,21 +619,42 @@ export function endTurn(state) {
 }
 
 function advancePlayer(state) {
-  const idx = FACTIONS.indexOf(state.turn.player);
-  let next = (idx + 1) % FACTIONS.length;
+  // Use the order from the §1 roll-off when available; otherwise fall back to the static FACTIONS cycle.
+  const order = (state.rollOff && Array.isArray(state.rollOff.order) && state.rollOff.order.length === FACTIONS.length)
+    ? state.rollOff.order
+    : FACTIONS;
+  const idx = order.indexOf(state.turn.player);
+  const next = (idx + 1) % order.length;
   state.turn = {
-    player: FACTIONS[next],
+    player: order[next],
     phase: 'roll',
     dice: null,
     bonusTurns: 0,
     didFreeExit: false,
   };
   state.movesThisTurn = 0;
+  // Reset per-turn flags for the incoming player.
+  for (const f of FACTIONS) {
+    if (state.factions[f]) state.factions[f].soulOfferedThisTurn = false;
+  }
 
   // If next player has pendingFreeExit, expose phase 'freeExit'
   const f = state.turn.player;
   if (state.factions[f].pendingFreeExit) {
     state.turn.phase = 'freeExit';
+  }
+
+  // §10 Soul Steal auto-offer at turn start: if current player owns a soul-steal
+  // horse on the track and hasn't been offered this turn, raise a one-time offer.
+  if (!state.pendingOffer && !state.pendingExchange && !state.pendingSoul && !state.pendingInherit) {
+    const ssOwner = state.horses.find(h =>
+      h.faction === f && h.position.type === 'track' && h.card && h.card.kind === 'soul'
+    );
+    if (ssOwner && !state.factions[f].soulOfferedThisTurn) {
+      state.factions[f].soulOfferedThisTurn = true;
+      state.pendingOffer = { kind: 'soul', horseId: ssOwner.id };
+      log(state, f, `holds the Soul Steal card \u2014 Soul Steal available!`);
+    }
   }
 }
 
@@ -524,29 +696,211 @@ export function declineFreeExit(state) {
   log(state, f, `declined the free exit.`);
 }
 
+// =====================================================================
+// §9 Joker inheritance — accept / decline
+// =====================================================================
+export function actInheritJoker(state, accept) {
+  const p = state.pendingInherit;
+  if (!p) return;
+  const horse = state.horses.find(h => h.id === p.attackerHorseId);
+  if (!horse) { state.pendingInherit = null; return; }
+  if (accept) {
+    // Discard old card publicly, swap in the joker.
+    if (horse.card) discardCard(state, horse.card);
+    horse.card = p.jokerCard;
+    horse.cardSeenBy = new Set(p.witnessFactions || [horse.faction]);
+    log(state, horse.faction, `accepts the Joker — old card is discarded.`);
+  } else {
+    // Joker is discarded publicly.
+    discardCard(state, p.jokerCard);
+    log(state, horse.faction, `declines the Joker — Joker discarded.`);
+  }
+  state.pendingInherit = null;
+}
+
+// =====================================================================
+// §7 Value Exchange — past halfway, before attacking
+// =====================================================================
+
+// Returns true if a horse is past the halfway point of its journey from exit.
+export function pastHalfway(faction, horse) {
+  if (!horse || horse.position.type !== 'track') return false;
+  return relativeProgress(faction, horse.position.index) >= HALFWAY;
+}
+
+export function valueExchangeEligibleHorses(state) {
+  const f = state.turn.player;
+  // Only on the current player's turn, in the choose phase, before any move this turn,
+  // and no pending interactive prompt (inherit/exchange/soul).
+  if (state.winner) return [];
+  if (state.turn.phase !== 'choose') return [];
+  if (state.movesThisTurn > 0) return [];
+  if (state.pendingInherit || state.pendingExchange || state.pendingSoul) return [];
+  return state.horses.filter(h =>
+    h.faction === f && h.card && pastHalfway(f, h)
+  ).map(h => h.id);
+}
+
+// Decline the current pendingOffer (no Value Exchange / no Soul Steal taken).
+export function actDeclineOffer(state) {
+  const o = state.pendingOffer;
+  if (!o) return;
+  const horse = state.horses.find(h => h.id === o.horseId);
+  const fac = horse ? horse.faction : 'system';
+  if (o.kind === 'exchange') log(state, fac, `declined the Value Exchange offer.`);
+  else if (o.kind === 'soul') log(state, fac, `declined the Soul Steal offer.`);
+  state.pendingOffer = null;
+}
+
+// Begin a value-exchange action from the current pending offer: open the first draw.
+export function actValueExchangeBegin(state) {
+  const o = state.pendingOffer;
+  if (!o || o.kind !== 'exchange') return null;
+  const horseId = o.horseId;
+  state.pendingOffer = null;
+  state.pendingExchange = { horseId, drawn: [], remaining: 3 };
+  return actValueExchangeDraw(state);
+}
+
+// Draw the next card for the in-progress value exchange. Returns the drawn card.
+export function actValueExchangeDraw(state) {
+  const p = state.pendingExchange;
+  if (!p) return null;
+  if (p.remaining <= 0) return null;
+  const c = drawCard(state);
+  p.drawn.push(c);
+  p.remaining -= 1;
+  return c;
+}
+
+// Resolve the current exchange decision: accept the latest drawn card, or decline.
+// On accept: latest card replaces horse.card; previous horse.card is publicly discarded;
+//            other drawn cards (declined earlier in this run) go back to the deck and are reshuffled.
+// On decline with remaining draws > 0: do nothing — caller may call actValueExchangeDraw again.
+// On decline with remaining draws == 0: keep original card; all 3 drawn cards go back to the deck and are reshuffled.
+export function actValueExchangeResolve(state, accept) {
+  const p = state.pendingExchange;
+  if (!p) return;
+  const horse = state.horses.find(h => h.id === p.horseId);
+  if (!horse) { state.pendingExchange = null; return; }
+  if (accept) {
+    const newCard = p.drawn[p.drawn.length - 1];
+    // Publicly discard the horse's old card (its value becomes known to everyone).
+    if (horse.card) discardCard(state, horse.card);
+    // Earlier declined draws go back to the deck (private — nobody else saw them).
+    for (let i = 0; i < p.drawn.length - 1; i++) state.deck.push(p.drawn[i]);
+    if (p.drawn.length > 1) state.deck = shuffle(state.deck);
+    horse.card = newCard;
+    horse.cardSeenBy = new Set([horse.faction]);
+    log(state, horse.faction, `swapped a horse's card via Value Exchange (drew ${p.drawn.length}).`);
+    state.pendingExchange = null;
+    return;
+  }
+  // Declined: if no more draws available, end the exchange and keep original.
+  if (p.remaining <= 0) {
+    // All drawn cards return to the deck and are reshuffled (private).
+    for (const c of p.drawn) state.deck.push(c);
+    state.deck = shuffle(state.deck);
+    log(state, horse.faction, `declined all ${p.drawn.length} Value Exchange draws — original card kept.`);
+    state.pendingExchange = null;
+  }
+  // Otherwise the engine is now waiting for actValueExchangeDraw to be called again.
+}
+
+// =====================================================================
+// §10 Soul Steal — peek an enemy card; then steal or pass
+// =====================================================================
+
+export function soulStealHorseId(state) {
+  const f = state.turn.player;
+  if (state.winner) return null;
+  // Triggered via pendingOffer at turn start \u2014 allow when no other prompt blocks it.
+  if (state.pendingInherit || state.pendingExchange || state.pendingSoul) return null;
+  const owner = state.horses.find(h => h.faction === f && h.card && h.card.kind === 'soul' && h.position.type === 'track');
+  return owner ? owner.id : null;
+}
+
+export function soulStealTargets(state) {
+  // Determine the soul-steal owner from either an open pending offer or a soul-steal-card-holding horse.
+  let ownerId = null;
+  if (state.pendingOffer && state.pendingOffer.kind === 'soul') ownerId = state.pendingOffer.horseId;
+  else ownerId = soulStealHorseId(state);
+  if (ownerId == null) return [];
+  const owner = state.horses.find(h => h.id === ownerId);
+  if (!owner) return [];
+  // Targets: enemy horses on the track whose card is not yet known to me.
+  const me = owner.faction;
+  return state.horses.filter(h =>
+    h.faction !== me && h.position.type === 'track' && h.card &&
+    !(h.cardSeenBy && h.cardSeenBy.has(me))
+  ).map(h => h.id);
+}
+
+// Begin: pick a target. Returns the peeked card (engine reveals to current player).
+export function actSoulStealPeek(state, targetHorseId) {
+  // Consume the pendingOffer if present (transition into the in-progress prompt).
+  if (state.pendingOffer && state.pendingOffer.kind === 'soul') state.pendingOffer = null;
+  if (!soulStealTargets(state).includes(targetHorseId)) return null;
+  const ownerId = soulStealHorseId(state);
+  state.pendingSoul = { horseId: ownerId, peekedHorseId: targetHorseId };
+  const target = state.horses.find(h => h.id === targetHorseId);
+  // Reveal the peeked card to the current player only.
+  if (!target.cardSeenBy) target.cardSeenBy = new Set([target.faction]);
+  target.cardSeenBy.add(state.turn.player);
+  log(state, state.turn.player, `peeks an enemy card with Soul Steal.`);
+  return target.card;
+}
+
+// Resolve peek: steal swaps cards and sends the target home; pass keeps things and only the peeker knows the card.
+export function actSoulStealResolve(state, steal) {
+  const p = state.pendingSoul;
+  if (!p) return;
+  const owner = state.horses.find(h => h.id === p.horseId);
+  const target = state.horses.find(h => h.id === p.peekedHorseId);
+  if (!owner || !target) { state.pendingSoul = null; return; }
+  if (steal) {
+    // Take target's card; original target horse is sent back to its stable.
+    const stolen = target.card;
+    target.card = null;
+    target.cardSeenBy = null;
+    // Owner's old soul-steal card is now publicly discarded (horse keeps the new card).
+    if (owner.card) discardCard(state, owner.card);
+    owner.card = stolen;
+    // Both fight participants conceptually saw it; mark seenBy as both.
+    owner.cardSeenBy = new Set([owner.faction, target.faction]);
+    sendBackToStable(state, target);
+    // After sendBackToStable, owner stays where they are.
+    log(state, owner.faction, `stole a card via Soul Steal — target horse sent back!`);
+  } else {
+    log(state, owner.faction, `peeked a card with Soul Steal but passed.`);
+  }
+  state.pendingSoul = null;
+}
+
 // Compute final ranking for game end (rule 12).
+// Comparison order:
+//   1. homeWinning  — count of horses currently sitting on a winning home step (3,4,5,6).
+//   2. Step-by-step — counts at home step 6, then 5, then 4, then 3 (lex compare).
+//   3. onBoard      — horses currently on the main track.
+//   4. furthest     — relative track progress of the most advanced horse.
+function compareForRanking(a, b) {
+  if (a.homeWinning !== b.homeWinning) return b.homeWinning - a.homeWinning;
+  // homeBySteps already ordered [step6, step5, step4, step3, step2, step1].
+  // We only consider winning steps (indexes 0..3 → steps 6..3).
+  for (let i = 0; i < 4; i++) {
+    if (a.homeBySteps[i] !== b.homeBySteps[i]) return b.homeBySteps[i] - a.homeBySteps[i];
+  }
+  if (a.onBoard !== b.onBoard) return b.onBoard - a.onBoard;
+  return b.furthest - a.furthest;
+}
+
 export function computeRanking(state) {
-  const facs = FACTIONS.slice();
-  // Compute score tuple per faction; highest first.
-  const score = (f) => {
-    const hs = state.horses.filter(h => h.faction === f);
-    const homeBySteps = [6,5,4,3,2,1].map(s => hs.filter(h => h.position.type === 'home' && h.position.step === s).length);
-    const onBoard = hs.filter(h => h.position.type === 'track').length;
-    const furthest = Math.max(0, ...hs.filter(h => h.position.type === 'track').map(h => relativeProgress(f, h.position.index)));
-    return { f, homeBySteps, onBoard, furthest };
-  };
-  const arr = facs.map(score);
-  // winner first
+  const arr = FACTIONS.map(f => ({ f, ...factionScore(state, f) }));
   if (state.winner) {
     arr.sort((a, b) => {
       if (a.f === state.winner) return -1;
       if (b.f === state.winner) return 1;
-      // compare home steps then onBoard then furthest
-      for (let i = 0; i < a.homeBySteps.length; i++) {
-        if (a.homeBySteps[i] !== b.homeBySteps[i]) return b.homeBySteps[i] - a.homeBySteps[i];
-      }
-      if (a.onBoard !== b.onBoard) return b.onBoard - a.onBoard;
-      return b.furthest - a.furthest;
+      return compareForRanking(a, b);
     });
   }
   return arr.map(x => x.f);
@@ -558,41 +912,37 @@ function relativeProgress(faction, trackIndex) {
 }
 
 // ---------- Per-faction live score (used by panels and ranking) ----------
-// Returns { home, onBoard, furthest, homeBySteps } where:
-//  home        = total horses currently in the home stretch (steps 1–6)
+// Returns { home, homeWinning, onBoard, furthest, homeBySteps } where:
+//  home        = total horses currently in the home stretch (steps 1–6)  [legacy field]
+//  homeWinning = horses currently at winning steps (3, 4, 5, 6)
 //  onBoard     = horses currently on the main track
 //  furthest    = highest relative progress of any horse on the main track (0 if none)
-//  homeBySteps = [count@step6, count@step5, ..., count@step1] (used for ranking lex compare)
+//  homeBySteps = [count@step6, count@step5, ..., count@step1] (ordered for lex compare)
 export function factionScore(state, f) {
   const hs = state.horses.filter(h => h.faction === f);
   const homeBySteps = [6,5,4,3,2,1].map(s =>
     hs.filter(h => h.position.type === 'home' && h.position.step === s).length);
   const home = hs.filter(h => h.position.type === 'home').length;
+  // Winning slots are steps 3..6 (index 0..3 in homeBySteps).
+  const homeWinning = homeBySteps[0] + homeBySteps[1] + homeBySteps[2] + homeBySteps[3];
   const onBoard = hs.filter(h => h.position.type === 'track').length;
   const trackProgs = hs.filter(h => h.position.type === 'track')
                        .map(h => relativeProgress(f, h.position.index));
   const furthest = trackProgs.length ? Math.max(...trackProgs) : 0;
-  return { home, onBoard, furthest, homeBySteps };
+  return { home, homeWinning, onBoard, furthest, homeBySteps };
 }
 
 // Returns a map { A:rank, B:rank, C:rank, D:rank } using DENSE ranking (1,1,2,3 style).
 // Higher rank value = worse standing. Ties keep equal rank, next group gets +1 (not skipped).
+// Same comparison as computeRanking (rule §12).
 export function computeStandings(state) {
   const scored = FACTIONS.map(f => ({ f, ...factionScore(state, f) }));
-  // Compare: returns negative if a is BETTER than b.
-  const cmp = (a, b) => {
-    for (let i = 0; i < a.homeBySteps.length; i++) {
-      if (a.homeBySteps[i] !== b.homeBySteps[i]) return b.homeBySteps[i] - a.homeBySteps[i];
-    }
-    if (a.onBoard !== b.onBoard) return b.onBoard - a.onBoard;
-    return b.furthest - a.furthest;
-  };
-  const sorted = scored.slice().sort(cmp);
+  const sorted = scored.slice().sort(compareForRanking);
   const ranks = {};
   let rank = 0;
   let prev = null;
   for (const s of sorted) {
-    if (prev === null || cmp(prev, s) !== 0) rank += 1;
+    if (prev === null || compareForRanking(prev, s) !== 0) rank += 1;
     ranks[s.f] = rank;
     prev = s;
   }
@@ -736,9 +1086,43 @@ export function redactStateForViewer(state, viewerFaction) {
     discard: (state.discard || []).map(c => ({ ...c })),
     winner: state.winner || null,
     movesThisTurn: state.movesThisTurn || 0,
+    rollOff: state.rollOff ? cloneSafe(state.rollOff) : null,
+    // Pending interactive prompts. Hide private content from viewers who don't own the relevant horse.
+    pendingInherit: redactPendingInherit(state, viewerFaction),
+    pendingOffer: state.pendingOffer ? { ...state.pendingOffer } : null,
+    pendingExchange: redactPendingExchange(state, viewerFaction),
+    pendingSoul: redactPendingSoul(state, viewerFaction),
     _localFaction: viewerFaction,
   };
   return cloneSafe(snapshot);
+}
+
+function redactPendingInherit(state, viewerFaction) {
+  const p = state.pendingInherit;
+  if (!p) return null;
+  const horse = state.horses.find(h => h.id === p.attackerHorseId);
+  const owner = horse ? horse.faction : null;
+  // Joker color is public knowledge after combat (witnesses know); for non-witnesses
+  // we still expose the color since the prompt is not visible to them anyway.
+  return { attackerHorseId: p.attackerHorseId, owner, jokerCard: { ...p.jokerCard } };
+}
+function redactPendingExchange(state, viewerFaction) {
+  const p = state.pendingExchange;
+  if (!p) return null;
+  const horse = state.horses.find(h => h.id === p.horseId);
+  const owner = horse ? horse.faction : null;
+  // Only the owner sees the drawn cards; others see counts only.
+  if (owner === viewerFaction) {
+    return { horseId: p.horseId, owner, drawn: p.drawn.map(c => ({ ...c })), remaining: p.remaining };
+  }
+  return { horseId: p.horseId, owner, drawnCount: p.drawn.length, remaining: p.remaining };
+}
+function redactPendingSoul(state, viewerFaction) {
+  const p = state.pendingSoul;
+  if (!p) return null;
+  const owner = state.horses.find(h => h.id === p.horseId);
+  const ownerFac = owner ? owner.faction : null;
+  return { horseId: p.horseId, peekedHorseId: p.peekedHorseId, owner: ownerFac };
 }
 
 // Convert a wire snapshot back into a runtime state (revives Set markers).
@@ -765,7 +1149,15 @@ export function buildCombatPayloadFor(combat, viewerFaction) {
   for (const d of (combat.allDefenders || [{ horse: combat.defender.horse, card: combat.defender.card }])) {
     participantFactions.add(d.horse.faction);
   }
-  const isParticipant = participantFactions.has(viewerFaction);
+  // Accept either a single faction string or an iterable (Set/array) of viewer factions.
+  // Viewer is "participant" iff ANY of its factions took part in this combat.
+  const viewerFactions = (typeof viewerFaction === 'string' || viewerFaction == null)
+    ? new Set(viewerFaction ? [viewerFaction] : [])
+    : new Set(viewerFaction);
+  let isParticipant = false;
+  for (const f of viewerFactions) {
+    if (participantFactions.has(f)) { isParticipant = true; break; }
+  }
 
   const censor = (card, owner) => {
     if (!card) return null;
@@ -779,6 +1171,8 @@ export function buildCombatPayloadFor(combat, viewerFaction) {
   return {
     att: censor(combat.attacker.card, combat.attacker.horse),
     def: censor(combat.defender.card, combat.defender.horse),
+    attFaction: combat.attacker.horse.faction,
+    defFaction: combat.defender.horse.faction,
     text: combat.text,
   };
 }
