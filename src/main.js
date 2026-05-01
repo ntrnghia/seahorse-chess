@@ -46,6 +46,12 @@ function factionDisplay(fac) {
 const boardEl = document.getElementById('board');
 let state;                  // Authoritative state (host/solo) OR latest received view (guest).
 let selectedHorseId = null;
+
+// Soul Steal target-pick mode: when active, the named enemy horses are
+// rendered as selectable on the board and clicking one resolves the picker.
+let soulPickMode = false;
+let soulPickTargetIds = new Set();
+let _soulPickResolve = null;
 let playerConfig = null;
 let botBusy = false;
 let mode = 'solo';          // 'solo' | 'host' | 'guest'
@@ -645,7 +651,9 @@ function refreshHorses() {
   if (!state) return;
   // Determine selectable horses for the local controllable faction(s) and current phase.
   const selectable = new Set();
-  if (!state.winner && isLocalTurn()) {
+  if (soulPickMode) {
+    for (const id of soulPickTargetIds) selectable.add(id);
+  } else if (!state.winner && isLocalTurn()) {
     if (state.turn.phase === 'choose') {
       const moves = legalMoves(state);
       for (const m of moves) selectable.add(m.horseId);
@@ -717,6 +725,15 @@ function refreshActionButtons() {
 // =====================================================================
 
 function onHorseClick(h) {
+  // Soul Steal target picking takes priority over normal phase interactions.
+  if (soulPickMode) {
+    if (soulPickTargetIds.has(h.id) && _soulPickResolve) {
+      const r = _soulPickResolve;
+      _soulPickResolve = null;
+      r({ targetId: h.id });
+    }
+    return;
+  }
   if (!isLocalTurn() || botBusy) return;
   if (state.turn.phase === 'freeExit') {
     const fm = freeExitMoves(state).find(m => m.horseId === h.id);
@@ -1190,39 +1207,52 @@ async function openOfferChronicle(offer) {
 async function openSoulStealTargetPicker(offer) {
   const targets = soulStealTargets(state);
   if (targets.length === 0) {
-    await showPrompt({
-      title: '\ud83d\udc41 Soul Steal',
-      bodyHtml: '<p>No valid enemy horses to peek at right now (all known or none on the track).</p>',
-      actions: [{ label: 'Close', value: null, primary: true }],
-    });
-    // Decline since there is nothing to do.
+    await appendChronicleAction(
+      'soul-pick',
+      '\ud83d\udc41 Soul Steal',
+      '<p>No valid enemy horses to peek at right now (all known or none on the track).</p>',
+      [{ label: 'OK', value: 'ok', primary: true }],
+    );
     if (mode === 'guest') lobby.sendActionToHost({ kind: 'OFFER_DECLINE' });
     else { actDeclineOffer(state); rerender(); broadcastState([]); maybeRunBot(); }
     return;
   }
-  const opts = targets.map(id => {
-    const h = state.horses.find(x => x.id === id);
-    return { label: `${factionDisplay(h.faction)} \u2022 Horse #${h.slot + 1}`, value: id };
+  // Enter board-pick mode: highlight the eligible enemy horses and wait for a click.
+  soulPickMode = true;
+  soulPickTargetIds = new Set(targets);
+  rerender();
+  const result = await new Promise(resolve => {
+    _soulPickResolve = resolve;
+    appendChronicleAction(
+      'soul-pick',
+      '\ud83d\udc41 Soul Steal \u2014 pick a target',
+      '<p>Click a highlighted enemy horse on the board to peek at its card.</p>',
+      [{ label: 'Cancel', value: 'cancel' }],
+    ).then(v => {
+      // If the click on a horse already resolved, this is a no-op.
+      if (_soulPickResolve === resolve) {
+        _soulPickResolve = null;
+        resolve(v == null ? 'cancel' : v);
+      }
+    });
   });
-  opts.push({ label: 'Cancel', value: null });
-  const targetId = await showPrompt({
-    title: '\ud83d\udc41 Soul Steal \u2014 pick a target',
-    bodyHtml: '<p>Select an enemy horse on the track. Their card will be revealed to you.</p>',
-    actions: opts.map(o => ({ label: o.label, value: o.value, primary: o.value !== null })),
-  });
-  if (targetId == null) {
-    // Re-surface the offer so the player can change their mind.
-    lastOfferShownKey = null;
-    rerender();
+  soulPickMode = false;
+  soulPickTargetIds = new Set();
+  rerender();
+  if (result && typeof result === 'object' && result.targetId != null) {
+    const targetId = result.targetId;
+    if (mode === 'guest') {
+      lobby.sendActionToHost({ kind: 'SOUL_PEEK', targetHorseId: targetId });
+    } else {
+      actSoulStealPeek(state, targetId);
+      rerender();
+      broadcastState([]);
+    }
     return;
   }
-  if (mode === 'guest') {
-    lobby.sendActionToHost({ kind: 'SOUL_PEEK', targetHorseId: targetId });
-  } else {
-    actSoulStealPeek(state, targetId);
-    rerender();
-    broadcastState([]);
-  }
+  // Cancelled \u2014 keep the offer pending so the player can re-open it.
+  lastOfferShownKey = null;
+  rerender();
 }
 
 async function runValueExchangeLoop() {
@@ -1265,17 +1295,16 @@ async function runSoulStealResolveLoop() {
     const target = state.horses.find(h => h.id === p.peekedHorseId);
     if (!target) return;
     const card = target.card;
-    const choice = await showPrompt({
-      title: '\ud83d\udc41 Soul Steal \u2014 peeked',
-      bodyHtml: `
-        <p>You see your target's card. Steal it (target sent home, you take the card) or pass.</p>
-        ${miniCardsRowHtml([card])}
-      `,
-      actions: [
+    const choice = await appendChronicleAction(
+      'soul-peek',
+      '\ud83d\udc41 Soul Steal \u2014 peeked',
+      `<p>You see your target's card. Steal it (target sent home, you take the card) or pass.</p>
+        ${miniCardsRowHtml([card])}`,
+      [
         { label: 'Pass', value: 'pass' },
         { label: 'Steal', value: 'steal', primary: true },
       ],
-    });
+    );
     if (mode === 'guest') {
       lobby.sendActionToHost({ kind: 'SOUL_RESOLVE', steal: choice === 'steal' });
       return;

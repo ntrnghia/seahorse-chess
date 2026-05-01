@@ -364,6 +364,14 @@ export function applyMove(state, move) {
     log(state, horse.faction, `crossed the halfway mark \u2014 Value Exchange available!`);
   }
 
+  // §10 Soul Steal auto-offer: if a horse holding the Soul Stealer is now on the
+  // track (e.g. just exited and drew it, or used a free exit), raise the offer.
+  // maybeRaiseSoulOffer is idempotent across the same turn, so calling it after
+  // every move is safe and covers the gap left by free-exit's skipped endTurn.
+  if (horse.position.type === 'track' && horse.card && horse.card.kind === 'soul') {
+    maybeRaiseSoulOffer(state, horse.faction);
+  }
+
   // Check win
   if (checkWin(state, horse.faction)) {
     state.winner = horse.faction;
@@ -612,10 +620,30 @@ export function endTurn(state) {
     t.dice = null;
     t.phase = 'roll';
     state.movesThisTurn = 0;
+    // §10: a bonus turn is still a fresh turn for the same player. If they
+    // didn't already get a Soul Steal offer this turn (e.g. they just exited
+    // a stable horse and pulled the Soul Steal card), raise it now.
+    maybeRaiseSoulOffer(state, f);
     return;
   }
 
   advancePlayer(state);
+}
+
+// Raise a one-time Soul Steal offer for `faction` if eligible and not yet
+// offered this turn. Shared by advancePlayer (turn-start) and the bonus-turn
+// branch in endTurn so a horse that gains the Soul Steal card mid-turn still
+// gets the offer on its bonus roll.
+function maybeRaiseSoulOffer(state, f) {
+  if (state.pendingOffer || state.pendingExchange || state.pendingSoul || state.pendingInherit) return;
+  if (state.factions[f].soulOfferedThisTurn) return;
+  const ssOwner = state.horses.find(h =>
+    h.faction === f && h.position.type === 'track' && h.card && h.card.kind === 'soul'
+  );
+  if (!ssOwner) return;
+  state.factions[f].soulOfferedThisTurn = true;
+  state.pendingOffer = { kind: 'soul', horseId: ssOwner.id };
+  log(state, f, `holds the Soul Steal card \u2014 Soul Steal available!`);
 }
 
 function advancePlayer(state) {
@@ -646,16 +674,7 @@ function advancePlayer(state) {
 
   // §10 Soul Steal auto-offer at turn start: if current player owns a soul-steal
   // horse on the track and hasn't been offered this turn, raise a one-time offer.
-  if (!state.pendingOffer && !state.pendingExchange && !state.pendingSoul && !state.pendingInherit) {
-    const ssOwner = state.horses.find(h =>
-      h.faction === f && h.position.type === 'track' && h.card && h.card.kind === 'soul'
-    );
-    if (ssOwner && !state.factions[f].soulOfferedThisTurn) {
-      state.factions[f].soulOfferedThisTurn = true;
-      state.pendingOffer = { kind: 'soul', horseId: ssOwner.id };
-      log(state, f, `holds the Soul Steal card \u2014 Soul Steal available!`);
-    }
-  }
+  maybeRaiseSoulOffer(state, f);
 }
 
 // Returns an array of move descriptors for consuming the pending free exit
