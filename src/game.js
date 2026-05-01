@@ -1135,6 +1135,12 @@ export function deserializeState(snapshot) {
   return s;
 }
 
+// Full serialization (no redaction). Used to persist the host/solo game to
+// localStorage so a refresh / disconnect can resume the live match.
+export function serializeState(state) {
+  return cloneSafe(state);
+}
+
 // Given a freshly-resolved combat object (from applyMove's returned info),
 // produce the per-viewer payload for the notification panel:
 //  - Participants (attacker + every defender faction) see the real cards.

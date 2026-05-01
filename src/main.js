@@ -10,7 +10,7 @@ import {
   freeExitMove, freeExitMoves, skipMove, declineFreeExit, computeRanking, describePlayer,
   pickGreedyMove, pickGreedyFreeExit,
   factionScore, computeStandings,
-  redactStateForViewer, deserializeState, buildCombatPayloadFor,
+  redactStateForViewer, deserializeState, serializeState, buildCombatPayloadFor,
   performTurnOrderRollOff,
   actInheritJoker,
   valueExchangeEligibleHorses, actValueExchangeBegin, actValueExchangeDraw, actValueExchangeResolve,
@@ -50,6 +50,82 @@ let playerConfig = null;
 let botBusy = false;
 let mode = 'solo';          // 'solo' | 'host' | 'guest'
 let localFaction = null;    // The faction the local user controls. solo: every human; pvp: just this viewer.
+
+// =====================================================================
+// PERSISTENCE — survive page refresh / network blip
+// =====================================================================
+// Two storage keys:
+//   shc.solo    : { state, playerConfig }                  — solo game in progress
+//   shc.session : { kind:'host'|'guest', roomId, name, ... } — PVP session
+const SOLO_KEY = 'shc.solo';
+const SESSION_KEY = 'shc.session';
+
+function saveSolo() {
+  if (mode !== 'solo' || !state || state.winner) return;
+  try {
+    localStorage.setItem(SOLO_KEY, JSON.stringify({
+      state: serializeState(state),
+      playerConfig,
+      v: 1,
+    }));
+  } catch {}
+}
+function loadSolo() {
+  try {
+    const raw = localStorage.getItem(SOLO_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || !obj.state) return null;
+    return obj;
+  } catch { return null; }
+}
+function clearSolo() { try { localStorage.removeItem(SOLO_KEY); } catch {} }
+
+function saveHostSession() {
+  if (mode !== 'host' || !state) return;
+  try {
+    const r = lobby.getRoomState();
+    // Strip peerIds — they're per-connection and meaningless after refresh.
+    const slots = {};
+    for (const f of FACTIONS) {
+      const s = r.slots[f];
+      slots[f] = s ? { kind: s.kind, name: s.name } : null;
+    }
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      kind: 'host',
+      roomId: r.id,
+      hostName: r.hostName,
+      hostFaction: localFaction,
+      slots,
+      started: r.started,
+      state: state.winner ? null : serializeState(state),
+      v: 1,
+    }));
+  } catch {}
+}
+function saveGuestSession() {
+  if (mode !== 'guest') return;
+  try {
+    const r = lobby.getRoomState();
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      kind: 'guest',
+      roomId: r.id,
+      name: lobby.getMyName(),
+      myFaction: lobby.getMyFaction(),
+      v: 1,
+    }));
+  } catch {}
+}
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || !obj.roomId) return null;
+    return obj;
+  } catch { return null; }
+}
+function clearSession() { try { localStorage.removeItem(SESSION_KEY); } catch {} }
 
 // =====================================================================
 // LOBBY
@@ -130,18 +206,143 @@ async function guestJoin(name, code) {
 function checkAutoJoin() {
   const params = new URLSearchParams(window.location.search);
   const room = params.get('room');
+  const session = loadSession();
+
   if (room && /^\d{9}$/.test(room)) {
+    // PVP auto-flow.
+    if (session && session.roomId === room && session.kind === 'host') {
+      // Resume hosting the same room (peer ID is deterministic, so the same
+      // room code becomes available again as soon as the old peer is gone).
+      hostResume(session);
+      return;
+    }
     document.getElementById('lobby-join-code').value = room;
     const saved = lobby.getSavedName();
     if (saved) {
       document.getElementById('lobby-name').value = saved;
-      // Auto-trigger join
+      // Auto-trigger join (guest path)
       guestJoin(saved, room);
     } else {
       showLobby('Enter your name to join room ' + room + '.');
     }
+    return;
+  }
+
+  // No PVP room in URL. Offer to resume a solo game in progress.
+  const solo = loadSolo();
+  if (solo && solo.state && !solo.state.winner) {
+    showResumeSoloPrompt(solo);
+    return;
+  }
+  // If a stale session exists without URL, drop it.
+  if (session) clearSession();
+  showLobby();
+}
+
+function showResumeSoloPrompt(solo) {
+  showLobby();
+  const status = document.getElementById('lobby-status');
+  status.classList.remove('error');
+  status.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.style.display = 'flex';
+  wrap.style.flexDirection = 'column';
+  wrap.style.gap = '8px';
+  wrap.style.alignItems = 'center';
+  const msg = document.createElement('div');
+  msg.textContent = 'You have a game in progress. Continue where you left off?';
+  const btnRow = document.createElement('div');
+  btnRow.style.display = 'flex';
+  btnRow.style.gap = '8px';
+  const btnYes = document.createElement('button');
+  btnYes.className = 'primary-btn';
+  btnYes.textContent = 'Continue game';
+  btnYes.addEventListener('click', () => resumeSolo(solo));
+  const btnNo = document.createElement('button');
+  btnNo.className = 'ghost-btn';
+  btnNo.textContent = 'Discard & start fresh';
+  btnNo.addEventListener('click', () => { clearSolo(); status.textContent = ''; });
+  btnRow.append(btnYes, btnNo);
+  wrap.append(msg, btnRow);
+  status.appendChild(wrap);
+}
+
+function resumeSolo(solo) {
+  mode = 'solo';
+  playerConfig = solo.playerConfig || null;
+  state = deserializeState(solo.state);
+  localFaction = null;
+  selectedHorseId = null;
+  botBusy = false;
+  clearChronicle();
+  hideLobby();
+  buildBoard(boardEl);
+  rerender();
+  maybeRunBot();
+}
+
+async function hostResume(session) {
+  // Restore the host-side game state and re-create the room with the same code.
+  // Existing guests will see hostDisconnected and try to reconnect; their
+  // HELLO will be name-matched back into their original slot.
+  playerConfig = null;
+  mode = 'host';
+  bindLobbyEvents();
+  try {
+    await lobby.hostResume(session);
+  } catch (e) {
+    clearSession();
+    showLobby('Could not resume room: ' + (e?.message || e), true);
+    return;
+  }
+  if (session.state) {
+    state = deserializeState(session.state);
+    localFaction = session.hostFaction || 'A';
+    selectedHorseId = null;
+    botBusy = false;
+    clearChronicle();
+    hideLobby();
+    buildBoard(boardEl);
+    rerender();
+    broadcastState([]);
+    maybeRunBot();
   } else {
-    showLobby();
+    // Game hadn't started yet — show the room view to wait for players.
+    hideLobby();
+    showRoom();
+  }
+}
+
+// Guest path: when the host vanishes, retry the connection a few times before
+// giving up. The host may be refreshing the page (peer ID is deterministic).
+let _hostLostRetry = 0;
+async function handleHostLost() {
+  const session = loadSession();
+  if (!session || session.kind !== 'guest') {
+    alert('Connection to host lost.');
+    location.search = '';
+    return;
+  }
+  if (_hostLostRetry >= 6) {
+    clearSession();
+    alert('Lost connection to the host.');
+    location.search = '';
+    return;
+  }
+  _hostLostRetry++;
+  // Show a transient banner so the user knows we're trying.
+  try {
+    const status = document.getElementById('notif-title');
+    if (status) status.textContent = `Reconnecting to host… (${_hostLostRetry})`;
+  } catch {}
+  await new Promise(r => setTimeout(r, 1500));
+  try {
+    net.disconnect();
+    await lobby.guestJoinRoom(session.name, session.roomId);
+    _hostLostRetry = 0;
+    // The fresh ROOM/STATE messages will repopulate everything.
+  } catch {
+    handleHostLost();
   }
 }
 
@@ -153,18 +354,31 @@ let lobbyEventsBound = false;
 function bindLobbyEvents() {
   if (lobbyEventsBound) return;
   lobbyEventsBound = true;
-  lobby.on('roomChanged', () => renderRoom());
+  lobby.on('roomChanged', () => {
+    renderRoom();
+    if (mode === 'host') saveHostSession();
+    else if (mode === 'guest') saveGuestSession();
+  });
   lobby.on('start', () => onRoomStart());
   lobby.on('kicked', () => {
+    clearSession();
     alert('You were kicked from the room.');
     location.search = '';
   });
   lobby.on('hostLost', () => {
-    alert('Connection to host lost.');
-    location.search = '';
+    // Don't tear down immediately — the host may be refreshing. Try to reconnect.
+    handleHostLost();
   });
   lobby.on('remoteAction', (faction, payload) => onRemoteAction(faction, payload));
-  lobby.on('state', (payload) => onGuestState(payload));
+  lobby.on('state', (payload) => { onGuestState(payload); saveGuestSession(); });
+  // When a refreshed guest reconnects and we re-bind their slot, immediately
+  // send them the current redacted STATE so their board renders without
+  // waiting for the next action.
+  lobby.on('peerReclaimed', (faction, conn) => {
+    if (mode !== 'host' || !state || !conn || !conn.open) return;
+    const snapshot = redactStateForViewer(state, faction);
+    conn.send({ type: 'STATE', payload: { state: snapshot, notifs: [] } });
+  });
 }
 
 function showRoom() {
@@ -276,6 +490,7 @@ document.getElementById('room-copy-invite').addEventListener('click', async () =
   document.getElementById('room-status').textContent = 'Invite link copied!';
 });
 document.getElementById('room-leave').addEventListener('click', () => {
+  clearSession();
   net.disconnect();
   location.search = '';
 });
@@ -374,6 +589,9 @@ function broadcastState(events) {
     const notifs = buildNotifsForViewer(events, f);
     conn.send({ type: 'STATE', payload: { state: snapshot, notifs } });
   }
+  // Persist host session so a refresh can resume the live match.
+  if (state && state.winner) clearSession();
+  else saveHostSession();
 }
 
 function buildNotifsForViewer(events, viewerFac) {
@@ -411,6 +629,11 @@ function rerender() {
   refreshActionButtons();
   // Open or resume any pending interactive prompt for the local user.
   maybeShowPendingPrompt();
+  // Persist after every state change so a refresh can resume the game.
+  if (mode === 'solo') {
+    if (state.winner) clearSolo();
+    else saveSolo();
+  }
 }
 
 function refreshHorses() {
@@ -1082,11 +1305,15 @@ if (_slBtn) _slBtn.addEventListener('click', (e) => e.preventDefault());
 
 document.getElementById('btn-restart').addEventListener('click', () => {
   selectedHorseId = null;
+  clearSolo();
+  clearSession();
   net.disconnect();
   location.search = '';
 });
 window.addEventListener('seahorse:restart', () => {
   selectedHorseId = null;
+  clearSolo();
+  clearSession();
   net.disconnect();
   location.search = '';
 });

@@ -36,11 +36,24 @@ export async function createRoom() {
   await loadPeerLib();
   // 9-digit numeric ID, leading digit 1-9.
   roomId = String(Math.floor(100000000 + Math.random() * 900000000));
+  return _openHostPeer(roomId);
+}
+
+// Re-create the host peer with a specific (existing) room ID. Used by
+// hostResume after a refresh — the deterministic peer ID becomes available
+// again as soon as the previous browser tab/socket is gone.
+export async function createRoomWithId(rid) {
+  await loadPeerLib();
+  roomId = String(rid);
+  return _openHostPeer(roomId);
+}
+
+function _openHostPeer(rid) {
   role = 'host';
   return new Promise((resolve, reject) => {
-    peer = new window.Peer(peerIdFor(roomId));
+    peer = new window.Peer(peerIdFor(rid));
     let opened = false;
-    peer.on('open', () => { opened = true; resolve({ roomId }); });
+    peer.on('open', () => { opened = true; resolve({ roomId: rid }); });
     peer.on('error', (e) => {
       if (!opened) reject(e); else emit('error', e);
     });
@@ -88,4 +101,7 @@ export function getRoomId() { return roomId; }
 export function disconnect() {
   try { if (peer) peer.destroy(); } catch {}
   peer = null; role = null; roomId = null; hostConn = null;
+  // Clear all listeners so a subsequent createRoom/joinRoom starts fresh
+  // (otherwise the old guest's handlers would also fire on the new peer).
+  for (const k of Object.keys(handlers)) delete handlers[k];
 }

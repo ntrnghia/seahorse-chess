@@ -64,8 +64,69 @@ export async function hostCreateRoom(name) {
   net.on('peerDisconnected', (conn) => {
     const fac = factionForPeer(conn.peer);
     if (fac) {
-      roomState.slots[fac] = null;
-      delete hostPeerByFaction[fac];
+      // If the game is already running, KEEP the slot reserved (just drop the
+      // stale peerId mapping). The owner may be refreshing — when they HELLO
+      // again with the same name, we re-bind the slot to the new connection.
+      if (roomState.started) {
+        // Keep slot.name; clear peerId so it's eligible for reclaim.
+        roomState.slots[fac].peerId = null;
+        delete hostPeerByFaction[fac];
+      } else {
+        roomState.slots[fac] = null;
+        delete hostPeerByFaction[fac];
+      }
+    }
+    hostConnByPeer.delete(conn.peer);
+    broadcastRoom();
+    emit('roomChanged', roomState);
+  });
+  net.on('message', (conn, data) => handleHostMessage(conn, data));
+
+  emit('roomChanged', roomState);
+  return roomState;
+}
+
+// Resume an existing host session after a refresh. Re-creates the same peer
+// (deterministic ID = `seahorse-chess-${roomId}`) and restores the prior
+// slot table so reconnecting guests can reclaim by name. The caller is
+// responsible for restoring the engine state (held outside lobby).
+export async function hostResume(session) {
+  if (!session || !session.roomId) throw new Error('No saved host session.');
+  myName = session.hostName || session.name || getSavedName() || 'Host';
+  setSavedName(myName);
+  role = 'host';
+  await net.createRoomWithId(session.roomId);
+  roomState = emptyRoomState();
+  roomState.id = session.roomId;
+  roomState.hostName = myName;
+  roomState.started = !!session.started;
+  for (const f of FACTIONS) {
+    const s = session.slots && session.slots[f];
+    if (!s) { roomState.slots[f] = null; continue; }
+    if (s.kind === 'bot') {
+      roomState.slots[f] = { kind: 'bot', name: s.name };
+    } else {
+      // Mark the host's own slot via peerId=null; other humans get peerId=null
+      // too (awaiting reconnect). Reclaim happens via HELLO name match.
+      roomState.slots[f] = { kind: 'human', name: s.name, peerId: null };
+    }
+  }
+  myFaction = session.hostFaction || null;
+
+  net.on('peerConnected', (conn) => {
+    hostConnByPeer.set(conn.peer, conn);
+    sendRoomTo(conn);
+  });
+  net.on('peerDisconnected', (conn) => {
+    const fac = factionForPeer(conn.peer);
+    if (fac) {
+      if (roomState.started) {
+        roomState.slots[fac].peerId = null;
+        delete hostPeerByFaction[fac];
+      } else {
+        roomState.slots[fac] = null;
+        delete hostPeerByFaction[fac];
+      }
     }
     hostConnByPeer.delete(conn.peer);
     broadcastRoom();
@@ -82,7 +143,31 @@ function handleHostMessage(conn, data) {
   switch (data.type) {
     case 'HELLO': {
       // Guest registers name; do not auto-claim, just store on the conn.
-      conn._guestName = String(data.name || 'Player').slice(0, 20);
+      const guestName = String(data.name || 'Player').slice(0, 20);
+      conn._guestName = guestName;
+      // Reclaim-by-name: if the game has started and a slot is held by a
+      // human with the same name, re-bind that slot to this new connection
+      // (its previous peerId is stale after the guest's refresh).
+      if (roomState.started) {
+        for (const f of FACTIONS) {
+          const s = roomState.slots[f];
+          if (s && s.kind === 'human' && s.name === guestName) {
+            // Drop any stale peer mapping for this faction.
+            const oldPeer = s.peerId;
+            if (oldPeer && oldPeer !== conn.peer) {
+              hostConnByPeer.delete(oldPeer);
+            }
+            s.peerId = conn.peer;
+            hostPeerByFaction[f] = conn.peer;
+            broadcastRoom();
+            // Tell the reconnecting guest the game has already started so it
+            // hides the lobby and renders the board, then send a fresh STATE.
+            try { conn.send({ type: 'START' }); } catch {}
+            emit('peerReclaimed', f, conn);
+            break;
+          }
+        }
+      }
       sendRoomTo(conn);
       break;
     }
