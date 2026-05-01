@@ -368,9 +368,12 @@ export function renderLog(state) {
 }
 
 // ---------- Notification (right column, replaces blocking overlays) ----------
-function miniCardHtml(card) {
+function miniCardHtml(card, faction) {
   if (!card) return '';
-  if (card.hidden) return `<div class="mini-card back"></div>`;
+  if (card.hidden) {
+    const fc = faction ? ` fac-${faction}` : '';
+    return `<div class="mini-card back${fc}"></div>`;
+  }
   if (card.kind === 'joker') {
     const lbl = card.color === 'red' ? 'RJ' : 'BJ';
     const red = card.color === 'red' ? ' red' : '';
@@ -566,9 +569,9 @@ export function showCombat(att, def, text, _autoMs = 0, who = {}) {
       <span class="who-def">${escapeHtml(defName)}</span>
     </div>
     <div class="notif-row">
-      ${miniCardHtml(att)}
+      ${miniCardHtml(att, who.attFaction)}
       <span class="vs">VS</span>
-      ${miniCardHtml(def)}
+      ${miniCardHtml(def, who.defFaction)}
     </div>
     ${jokerExtras}
     <div class="notif-text" style="margin-top:8px">${escapeHtml(text)}</div>

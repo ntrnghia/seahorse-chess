@@ -743,11 +743,15 @@ body > .dice-stable,
 }
 .notif .mini-card.back::after {
   content: '\265E';
-  color: var(--gold);
+  color: var(--fac-color, var(--gold));
   font-size: 22px;
   position: absolute; inset: 0; display: grid; place-items: center;
-  text-shadow: 0 0 8px rgba(251,191,36,.6);
+  text-shadow: 0 0 8px var(--fac-glow, rgba(251,191,36,.6));
 }
+.notif .mini-card.back.fac-A { --fac-color: var(--A-2); --fac-glow: rgba(239,69,101,.6); border-color: rgba(239,69,101,.55); }
+.notif .mini-card.back.fac-B { --fac-color: var(--B-2); --fac-glow: rgba(58,166,255,.6); border-color: rgba(58,166,255,.55); }
+.notif .mini-card.back.fac-C { --fac-color: var(--C-2); --fac-glow: rgba(74,222,128,.6); border-color: rgba(74,222,128,.55); }
+.notif .mini-card.back.fac-D { --fac-color: var(--D-2); --fac-glow: rgba(251,191,36,.6); border-color: rgba(251,191,36,.55); }
 .notif .vs { font-family: 'Cinzel', serif; color: var(--gold); font-size: 16px; }
 .notif .notif-text { color: var(--ink); font-size: 13px; line-height: 1.4; }
 .notif .joker-draws { margin-top: 10px; padding: 8px 10px; border: 1px dashed rgba(251,191,36,.5); border-radius: 8px; background: rgba(251,191,36,.06); }

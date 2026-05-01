@@ -567,7 +567,10 @@ function dispatchLocalNotif(n) {
     const subtitle = `Only you can see this — ${cardLabel(n.card)}`;
     showCard(n.card, n.title || 'You drew a card', subtitle);
   } else if (n.type === 'combat') {
-    showCombat(n.att, n.def, n.text, 0, { attName: n.attName, defName: n.defName });
+    showCombat(n.att, n.def, n.text, 0, {
+      attName: n.attName, defName: n.defName,
+      attFaction: n.attFaction, defFaction: n.defFaction,
+    });
   }
 }
 
@@ -606,6 +609,8 @@ function buildNotifsForViewer(events, viewerFac) {
         att: p.att, def: p.def, text: p.text,
         attName: factionDisplay(p.attFaction),
         defName: factionDisplay(p.defFaction),
+        attFaction: p.attFaction,
+        defFaction: p.defFaction,
       });
     }
   }
@@ -1009,6 +1014,8 @@ async function doApply(move) {
     await showCombat(att, def, result.combat.text, auto, {
       attName: factionDisplay(p.attFaction),
       defName: factionDisplay(p.defFaction),
+      attFaction: p.attFaction,
+      defFaction: p.defFaction,
     });
     rerender();
   }
