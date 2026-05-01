@@ -142,7 +142,11 @@ export function renderHorses(boardEl, state, opts = {}) {
           if (h.card.suit === 'H' || h.card.suit === 'D') extraCls = ' card-red';
         }
         el.classList.add('reveal');
-        if (extraCls.trim()) el.classList.add(extraCls.trim());
+        // classList.add() rejects whitespace-containing strings, so split first
+        // (Red Joker reveal sets two classes: 'card-special card-red').
+        for (const cls of extraCls.trim().split(/\s+/)) {
+          if (cls) el.classList.add(cls);
+        }
         el.style.fontSize = `${cellW * 0.34}px`;
         el.textContent = label;
       } else {
