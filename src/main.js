@@ -651,9 +651,12 @@ function refreshHorses() {
   if (!state) return;
   // Determine selectable horses for the local controllable faction(s) and current phase.
   const selectable = new Set();
+  // While any interactive prompt is open (offer/exchange/soul/inherit), no
+  // movement is allowed \u2014 don't highlight any selectable horses or targets.
+  const promptBlock = !!(state.pendingOffer || state.pendingExchange || state.pendingSoul || state.pendingInherit);
   if (soulPickMode) {
     for (const id of soulPickTargetIds) selectable.add(id);
-  } else if (!state.winner && isLocalTurn()) {
+  } else if (!promptBlock && !state.winner && isLocalTurn()) {
     if (state.turn.phase === 'choose') {
       const moves = legalMoves(state);
       for (const m of moves) selectable.add(m.horseId);
@@ -661,6 +664,9 @@ function refreshHorses() {
       for (const m of freeExitMoves(state)) selectable.add(m.horseId);
     }
   }
+  // If a prompt has just opened while a horse was selected, drop the selection
+  // so its target highlights are cleared too.
+  if (promptBlock && selectedHorseId !== null) selectedHorseId = null;
   // Determine which factions count as the local viewer for card reveal.
   let viewerFactions;
   if (mode === 'solo') {
@@ -735,6 +741,8 @@ function onHorseClick(h) {
     return;
   }
   if (!isLocalTurn() || botBusy) return;
+  // Block all horse interactions while an interactive prompt is open.
+  if (state.pendingOffer || state.pendingExchange || state.pendingSoul || state.pendingInherit) return;
   if (state.turn.phase === 'freeExit') {
     const fm = freeExitMoves(state).find(m => m.horseId === h.id);
     if (!fm) return;
