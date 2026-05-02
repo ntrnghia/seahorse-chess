@@ -1270,10 +1270,17 @@ async function runValueExchangeLoop() {
     const drawn = p.drawn || [];
     const lastCard = drawn[drawn.length - 1];
     if (!lastCard) break;
+    const horse = state.horses.find(h => h.id === p.horseId);
+    const currentCard = horse && horse.card;
+    const currentHtml = currentCard
+      ? `<p class="muted" style="margin:6px 0 2px;">Your horse's current card:</p>${miniCardsRowHtml([currentCard])}`
+      : '';
     const choice = await appendChronicleAction(
       'exchange-draw',
       `\u21bb Value Exchange (draw ${drawn.length}/3)`,
       `<p>You drew this card. Accept to swap; decline to ${p.remaining > 0 ? 'try the next draw' : 'keep your original card'}.</p>
+        ${currentHtml}
+        <p class="muted" style="margin:6px 0 2px;">Drawn:</p>
         ${miniCardsRowHtml(drawn, { highlightLast: true })}`,
       [
         (p.remaining > 0 ? { label: 'Decline (draw next)', value: 'decline' } : { label: 'Decline (keep original)', value: 'decline' }),
