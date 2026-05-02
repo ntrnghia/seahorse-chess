@@ -566,6 +566,9 @@ function sendBackToStable(state, horse) {
   horse.card = null;
   horse.cardSeenBy = null;
   horse.lives = 3;
+  // Reset the one-time Value Exchange flag so the offer can fire again the
+  // next time this horse exits and crosses halfway.
+  horse.veOffered = false;
   const used = new Set(
     state.horses
       .filter(h => h.faction === horse.faction && h !== horse && h.position.type === 'stable')
